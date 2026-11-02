@@ -13,7 +13,7 @@ import { useTranslation } from "react-i18next";
 import { FlaskConical } from "lucide-react";
 import { toast } from "sonner";
 
-import api from "~/services/api";
+import api, { isApiNotFound } from "~/services/api";
 import type { AgentLoopSettings } from "~/types";
 import {
   SettingsFold,
@@ -106,7 +106,13 @@ export function AgentBotSection({ settings, onSettings }: SettingsSectionProps) 
       onSettings({ ...settings, agentLoop: response.agentLoop });
     } catch (err) {
       onSettings({ ...settings, agentLoop: previous });
-      toast.error(errorText(err));
+      // 404 = 后端压根没有这个接口：界面是新的、程序是旧的（只换了前端没换 exe）。
+      // 报 "Not found" 用户无法自救，这里直接说清是版本错配。
+      toast.error(
+        isApiNotFound(err)
+          ? t("settings:experiments.agent_bot.stale_backend")
+          : errorText(err),
+      );
     }
   };
 

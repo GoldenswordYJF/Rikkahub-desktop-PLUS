@@ -40,6 +40,16 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 后端根本没有这个接口(404)。典型成因是产物错配:界面已是新版、后端程序还是旧版
+ * (便携版只换了 web-ui 没换 exe / Docker 拉了旧 tag)。只认 code,不看文案——
+ * 服务端 404 的 "Not found" 可能是路由缺失,也可能是一次真正的资源不存在,
+ * 调用方要结合上下文决定提示,这里只回答"是不是 404"。
+ */
+export function isApiNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.code === 404;
+}
+
 const WEB_AUTH_STORAGE_KEY = "rikkahub:web-auth";
 const WEB_AUTH_REQUIRED_EVENT = "rikkahub:web-auth-required";
 const STARTUP_PENDING_EVENT = "rikkahub:startup-pending";

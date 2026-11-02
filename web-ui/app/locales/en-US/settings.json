@@ -242,7 +242,8 @@
       "stall_repeat_limit": "Stall threshold",
       "stall_repeat_limit_desc": "Consecutive repeats of the same tool with identical arguments and no new output that trigger a stall.",
       "same_error_limit": "Same-error threshold",
-      "same_error_limit_desc": "Consecutive occurrences of the same error signature that force a replan instead of a plain retry."
+      "same_error_limit_desc": "Consecutive occurrences of the same error signature that force a replan instead of a plain retry.",
+      "stale_backend": "The server has no such settings endpoint: the UI is newer than the backend. Update RikkaHub so both are the same version (usually the frontend was updated without the backend binary)."
     },
     "notice_title": "Experimental feature, off by default",
     "notice_desc": "When enabled, memories are graded as setting / habit / event and may be summarized, degraded, or forgotten over time. With the master switch off there are no side effects. Keep dry-run on until you have reviewed the proposals.",
