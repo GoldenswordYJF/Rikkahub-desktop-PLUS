@@ -29,3 +29,22 @@ export type {
   UploadFilesResponseDto,
   WorkspaceDto,
 } from "@server/foundation/types/dto";
+
+// 自主循环(S1):运行记录契约。权威声明在 pc-server/agent-loop/types.ts(PC-only,
+// 不进 foundation 跨端域),前端 type-only 复用,不手写镜像。
+export type {
+  AgentRunEventDto,
+  AgentRunEventKind,
+  AgentRunEventPageDto,
+  AgentRunListDto,
+  AgentRunPhase,
+  AgentRunPushDto,
+  AgentRunSnapshotDto,
+  AgentRunStatus,
+  AgentRunSummary,
+  RunBoundarySnapshotDto,
+  RunPlanProjectionDto,
+  RunPlanToolLocationDto,
+  RunPlanUnavailableReason,
+  RunProjectionDto,
+} from "@server/agent-loop/types";

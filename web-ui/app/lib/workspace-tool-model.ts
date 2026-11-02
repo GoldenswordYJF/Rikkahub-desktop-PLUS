@@ -13,6 +13,8 @@ export type WorkspaceToolKind = "read" | "write" | "edit" | "bash";
 const KIND_BY_TOOL_NAME: Record<string, WorkspaceToolKind> = {
   // pi 原名(PC 原生)
   read: "read",
+  // S7 批量读取:与 read 同属只读侦察,留在思维链折叠组
+  read_files: "read",
   write: "write",
   edit: "edit",
   bash: "bash",

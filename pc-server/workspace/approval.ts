@@ -19,13 +19,14 @@
 
 import { isAbsolute, resolve, sep } from "node:path";
 import type { JsonValue, WorkspacePermissionPreset } from "../foundation/types";
+import type { ToolBoundaryAccess, ToolBoundaryTargetScope } from "../foundation/tool-boundary";
 import { resolveToCwd } from "./tools/path-utils";
 
-export const WORKSPACE_TOOL_NAMES = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
+export const WORKSPACE_TOOL_NAMES = ["read", "read_files", "write", "edit", "bash", "grep", "find", "ls"] as const;
 
 /** 只读工具集:恒免审。grep/find/ls 是 bash 不可用时的兜底(runtime.mountedWorkspaceToolNames),
- *  读语义与 read 同档——不改盘、不出网,任何档位都无需打断用户。 */
-const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
+ *  read_files 是 S7 批量读取;读语义与 read 同档——不改盘、不出网,任何档位都无需打断用户。 */
+const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "read_files", "grep", "find", "ls"]);
 
 export type WorkspaceToolName = (typeof WORKSPACE_TOOL_NAMES)[number];
 
@@ -58,6 +59,43 @@ export function lexicalWorkspaceCwd(root: string, workspaceCwd: string | null | 
   if (!raw) return root;
   const absolute = isAbsolute(raw) ? resolve(raw) : resolve(root, raw);
   return isLexicallyOutsideRoot(absolute, root) ? root : absolute;
+}
+
+/** O4:工具调用的权限语义(只用于边界复盘,不参与审批判定矩阵)。 */
+export function workspaceToolAccess(tool: WorkspaceToolName): ToolBoundaryAccess {
+  if (tool === "bash") return "execute";
+  if (tool === "write" || tool === "edit") return "write";
+  return "read";
+}
+
+/** O4:目标落点的词法判定(不碰 fs,与审批判定同源)。bash 的参数是命令而非路径,
+ *  不做猜测;形状残缺同样如实标 unknown,不能把"没解析出来"说成区内。 */
+export function workspaceCallTargetScope(
+  tool: WorkspaceToolName,
+  args: Record<string, JsonValue>,
+  ctx: Pick<WorkspaceCallContext, "root" | "cwd">,
+): ToolBoundaryTargetScope {
+  if (tool === "bash") return "unknown";
+  if (tool === "read_files") {
+    const files = args.files;
+    if (!Array.isArray(files) || files.length === 0) return "unknown";
+    let resolvedAny = false;
+    for (const item of files) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+      const path = (item as Record<string, JsonValue>).path;
+      if (typeof path !== "string" || !path.trim()) continue;
+      resolvedAny = true;
+      if (isLexicallyOutsideRoot(resolveToCwd(path, ctx.cwd), ctx.root)) return "outside";
+    }
+    return resolvedAny ? "inside" : "unknown";
+  }
+  const raw = args.path;
+  if (typeof raw !== "string" || !raw.trim()) {
+    // grep/find/ls 的 path 可省略 = 当前目录;read/write/edit 缺 path 是残缺调用,
+    // 由工具内核报 schema 错误,这里不伪造目标。
+    return tool === "grep" || tool === "find" || tool === "ls" ? "inside" : "unknown";
+  }
+  return isLexicallyOutsideRoot(resolveToCwd(raw, ctx.cwd), ctx.root) ? "outside" : "inside";
 }
 
 export interface WorkspaceCallContext {
@@ -110,33 +148,39 @@ export function workspaceCallApprovalReason(
 // 每项 [正则, 人话说明];说明会出现在拦截错误文案里,模型与用户都看得懂。
 // 目标 token 结束判定:后随空白/行尾/命令分隔符(允许 rm -rf / --no-preserve-root 这种带尾部旗标的形态)。
 // 命令位判定:mkfs/diskpart 等裸命令要求出现在行首、分隔符后或 sudo 后,避免误伤 grep 'mkfs' 之类字面量引用。
-const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+const DANGEROUS_PATTERNS: ReadonlyArray<readonly [string, RegExp, string]> = [
   // rm -rf 指向根/家目录/盘符根(允许 rm -rf ./build 这类区内清理)
-  [/\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)(\/|~|\$HOME)\2(?=\s|$|[;&|)])/, "recursive force-delete of the filesystem root or home directory"],
-  [/\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)\/(bin|boot|dev|etc|lib|proc|sys|usr|var)\b/, "recursive force-delete of a system directory"],
-  [/\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/, "recursive force-delete of a drive root"],
+  ["rm_root", /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)(\/|~|\$HOME)\2(?=\s|$|[;&|)])/, "recursive force-delete of the filesystem root or home directory"],
+  ["rm_system_dir", /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)\/(bin|boot|dev|etc|lib|proc|sys|usr|var)\b/, "recursive force-delete of a system directory"],
+  ["rm_drive_root", /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/, "recursive force-delete of a drive root"],
   // Windows 整盘/系统目录删除(Git Bash 下也可能调 cmd /c del)
-  [/\bdel\s+(\/[a-zA-Z]\s+)*\/s\b.*\s(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/i, "recursive delete of a drive root (del /s)"],
-  [/\b(rd|rmdir)\s+\/s\b.*\s(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/i, "recursive removal of a drive root (rd /s)"],
+  ["del_drive_root", /\bdel\s+(\/[a-zA-Z]\s+)*\/s\b.*\s(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/i, "recursive delete of a drive root (del /s)"],
+  ["rd_drive_root", /\b(rd|rmdir)\s+\/s\b.*\s(["']?)[A-Za-z]:[\\/]?\2(?=\s|$|[;&|)])/i, "recursive removal of a drive root (rd /s)"],
   // 磁盘/文件系统毁灭(命令位判定)
-  [/(?:^|[;&|(]\s*|\bsudo\s+)mkfs(\.\w+)?\b/, "filesystem format (mkfs)"],
-  [/\bformat(\.com)?\s+[A-Za-z]:/i, "drive format"],
-  [/(?:^|[;&|(]\s*|\bsudo\s+)diskpart\b/i, "disk partitioning tool (diskpart)"],
-  [/\bdd\b[^;&|]*\bof=\/dev\/(sd[a-z]|hd[a-z]|nvme\d+n\d+|disk\d+)\b/, "raw write to a block device (dd)"],
-  [/>\s*\/dev\/(sd[a-z]|hd[a-z]|nvme\d+n\d+)\b/, "raw write to a block device"],
+  ["mkfs", /(?:^|[;&|(]\s*|\bsudo\s+)mkfs(\.\w+)?\b/, "filesystem format (mkfs)"],
+  ["format_drive", /\bformat(\.com)?\s+[A-Za-z]:/i, "drive format"],
+  ["diskpart", /(?:^|[;&|(]\s*|\bsudo\s+)diskpart\b/i, "disk partitioning tool (diskpart)"],
+  ["dd_block_device", /\bdd\b[^;&|]*\bof=\/dev\/(sd[a-z]|hd[a-z]|nvme\d+n\d+|disk\d+)\b/, "raw write to a block device (dd)"],
+  ["redirect_block_device", />\s*\/dev\/(sd[a-z]|hd[a-z]|nvme\d+n\d+)\b/, "raw write to a block device"],
   // 系统级权限破坏 / 注册表删除
-  [/\bchmod\s+(-[a-zA-Z]*R[a-zA-Z]*\s+)?[0-7]{3,4}\s+\/\s*(?:$|[;&|)])/, "recursive permission change on filesystem root"],
-  [/\breg\s+delete\s+(["']?)HK(LM|EY_LOCAL_MACHINE)\b/i, "registry hive deletion (HKLM)"],
+  ["chmod_root", /\bchmod\s+(-[a-zA-Z]*R[a-zA-Z]*\s+)?[0-7]{3,4}\s+\/\s*(?:$|[;&|)])/, "recursive permission change on filesystem root"],
+  ["reg_delete_hklm", /\breg\s+delete\s+(["']?)HK(LM|EY_LOCAL_MACHINE)\b/i, "registry hive deletion (HKLM)"],
   // fork 炸弹
-  [/:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:/, "fork bomb"],
+  ["fork_bomb", /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:/, "fork bomb"],
 ];
+
+/** 命中返回规则 id + 人话说明(进拦截文案),未命中返回 null。id 用于 run 流水复盘,
+ *  不随文案措辞变化。 */
+export function findDangerousCommandRule(command: string): { id: string; reason: string } | null {
+  const normalized = command.trim();
+  if (!normalized) return null;
+  for (const [id, pattern, reason] of DANGEROUS_PATTERNS) {
+    if (pattern.test(normalized)) return { id, reason };
+  }
+  return null;
+}
 
 /** 命中返回人话说明(进拦截文案),未命中返回 null。 */
 export function findDangerousCommandReason(command: string): string | null {
-  const normalized = command.trim();
-  if (!normalized) return null;
-  for (const [pattern, reason] of DANGEROUS_PATTERNS) {
-    if (pattern.test(normalized)) return reason;
-  }
-  return null;
+  return findDangerousCommandRule(command)?.reason ?? null;
 }

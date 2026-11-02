@@ -3,6 +3,7 @@
 // 钉住三条语义:
 //   1) 工具面枚举与聊天引擎同源同开关:enableWebSearch 关 → search 对不声明;
 //      MCP 面跟随 assistant.mcpServers 选择 + 服务器/工具 enable;
+//      计划面板默认开,displaySetting.planPanel=false → update_plan 不声明;
 //   2) 审批语义与聊天引擎同口径:MCP 工具 needsApproval → pending 卡 → 拒绝回灌
 //      拒绝理由并抛错;auto 工具(save_memory)不产卡直通执行;
 //   3) 执行路由走 executeToolCall(真跑 save_memory:进待确认队列,单文本结果
@@ -88,17 +89,26 @@ function execOf(tool: { execute: unknown }): ExecFn {
 }
 
 describe("工具面枚举", () => {
-  test("search/save_memory/MCP 全在列,开关同聊天引擎同源", () => {
+  test("search/save_memory/MCP/计划全在列,开关同聊天引擎同源", () => {
     const { ctx } = fixture();
     const names = createPiGeneralTools(ctx).map((tool) => tool.name);
-    expect(names).toEqual(["search_web", "scrape_web", "save_memory", "mcp__alpha", "mcp__beta"]);
+    // update_plan 排在末位:计划面板是默认开的常规显示项(非实验),与聊天引擎同一门控。
+    expect(names).toEqual(["search_web", "scrape_web", "save_memory", "mcp__alpha", "mcp__beta", "update_plan"]);
 
     store.state.settings.enableWebSearch = false;
     try {
       const closed = createPiGeneralTools(ctx).map((tool) => tool.name);
-      expect(closed).toEqual(["save_memory", "mcp__alpha", "mcp__beta"]);
+      expect(closed).toEqual(["save_memory", "mcp__alpha", "mcp__beta", "update_plan"]);
     } finally {
       store.state.settings.enableWebSearch = true;
+    }
+
+    // 用户显式关掉计划面板 → 模型面看不到这个工具(历史里的计划 part 仍照常渲染)。
+    store.state.settings.displaySetting.planPanel = false;
+    try {
+      expect(createPiGeneralTools(ctx).map((tool) => tool.name)).not.toContain("update_plan");
+    } finally {
+      store.state.settings.displaySetting.planPanel = true;
     }
   });
 

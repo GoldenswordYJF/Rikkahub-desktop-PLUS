@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
+import { DesktopCompanion } from "~/components/companion/desktop-companion";
 import { ModelList } from "~/components/input/model-list";
 import { SearchPickerButton } from "~/components/input/search-picker";
 import { MemoryBadge } from "~/components/memory/memory-badge";
@@ -833,7 +834,10 @@ function ChatInputInner({
 
   return (
     <div className={className}>
-      <div className="mx-auto w-full max-w-3xl px-4 py-4">
+      <div className="relative mx-auto w-full max-w-3xl px-4 py-4">
+        {/* 实验性桌面伴侣：绝对定位在输入列左侧空档里（不占布局），窗格窄于
+            60rem 时由 CSS 容器查询整体隐藏。总开关在「设置 › 实验」里。 */}
+        <DesktopCompanion conversationId={conversationId ?? null} isGenerating={Boolean(isGenerating)} />
         {/* 可拖拽的上沿手柄：上下拖改变输入框高度（左右锁定）。对标微信等桌面聊天
             应用，让用户按需放大/收起输入区，尺寸跨会话与重启保留。 */}
         <div

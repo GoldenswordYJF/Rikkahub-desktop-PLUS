@@ -76,6 +76,13 @@ function argsOf(server: Record<string, unknown>): string[] {
   return Array.isArray(server.args) ? server.args.map((arg) => String(arg ?? "")) : [];
 }
 
+/** 受限沙盒下该服务器要写的外部目录（如向量库数据目录），一行一个绝对路径。 */
+function sandboxDirsOf(server: Record<string, unknown>): string[] {
+  return Array.isArray(server.sandboxWritableDirs)
+    ? server.sandboxWritableDirs.map((dir) => String(dir ?? "")).filter((dir) => dir.length > 0)
+    : [];
+}
+
 /** builtin = 进程内内置服务器（@rikkahub/fetch）：没有连接参数，只有开关。 */
 function transportOf(server: Record<string, unknown>): "streamable_http" | "stdio" | "builtin" {
   const type = String(server.type ?? "");
@@ -608,6 +615,25 @@ function McpServerEditor({
                 {/* 沙盒机制提示：本地服务器由本机进程启动，受限档下是低完整性进程——写自身
                     数据目录失败时，用户要能在这里直接读到原因和出路，而不是去猜权限问题。 */}
                 <Notice tone={sandboxOn && !sandboxActive ? "warning" : "info"}>{sandboxMessage}</Notice>
+                {/* 例外声明：服务器自己的数据目录（向量库、模型缓存等）在沙盒边界外，
+                    用户显式填在这里；启动时由 Medium 准备进程标为 Low，重启后生效。 */}
+                <SettingsField
+                  label={t("settings:mcp.server.sandbox_dirs")}
+                  description={t("settings:mcp.server.sandbox_dirs_desc")}
+                >
+                  <Textarea
+                    value={sandboxDirsOf(draft).join("\n")}
+                    onChange={(event) =>
+                      patchDraft({
+                        ...draft,
+                        sandboxWritableDirs: event.target.value.split("\n").map((line) => line.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder={t("settings:mcp.server.sandbox_dirs_placeholder")}
+                    className="field-sizing-fixed h-20 max-h-40 overflow-y-auto font-mono text-xs"
+                    spellCheck={false}
+                  />
+                </SettingsField>
               </>
             ) : isBuiltin ? null : (
               <SettingsField label={t("settings:mcp.server.url")} hint={t("settings:mcp.server.url_desc")}>
@@ -876,7 +902,7 @@ function createMcpServer(transport: "streamable_http" | "stdio" = "streamable_ht
     id: createId(),
     type: transport,
     url: "",
-    ...(transport === "stdio" ? { command: "", args: [], env: [], cwd: "" } : {}),
+    ...(transport === "stdio" ? { command: "", args: [], env: [], cwd: "", sandboxWritableDirs: [] } : {}),
     commonOptions: { enable: true, name: "", headers: [], tools: [] },
   };
 }

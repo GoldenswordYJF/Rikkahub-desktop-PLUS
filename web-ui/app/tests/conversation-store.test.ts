@@ -3,7 +3,7 @@
 // node_update 无快照时返回 no_detail、轮询快照的 updateAt 单调守卫(R7-3)。
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import type { ConversationDto, ConversationNodeUpdateEventDto, MessageNodeDto } from "~/types";
+import type { AgentRunEventDto, AgentRunSummary, ConversationDto, ConversationNodeUpdateEventDto, MessageNodeDto } from "~/types";
 import {
   applyConversationNodesPage,
   applyConversationNodeUpdate,
@@ -13,6 +13,7 @@ import {
   releaseConversationEntry,
   resetConversationStoreForTest,
   retainConversationEntry,
+  setConversationAgentRun,
   setConversationError,
   setConversationSubscribing,
   useConversationStore,
@@ -74,6 +75,7 @@ function nodeUpdate(
 }
 
 const entries = () => useConversationStore.getState().entries;
+const runs = () => useConversationStore.getState().agentRuns;
 
 beforeEach(() => {
   resetConversationStoreForTest();
@@ -272,5 +274,87 @@ describe("窗口化快照与翻页分片(专题2 I-2)", () => {
     expect(
       applyConversationNodesPage("c1", { nodes: [node("nx", "x")], stamps: ["s"], offset: 0, updateAt: 1 }),
     ).toBe("stale");
+  });
+});
+
+describe("agentRuns 运行流水(自主循环 S1)", () => {
+  function runSummary(overrides: Partial<AgentRunSummary> = {}): AgentRunSummary {
+    return {
+      id: "run-1",
+      conversationId: "a",
+      nodeId: "n1",
+      engine: "chat",
+      status: "running",
+      phase: "acting",
+      stopReason: null,
+      rounds: 0,
+      attempts: 0,
+      replanCount: 0,
+      stallReason: null,
+      goal: null,
+      startedAt: 1,
+      endedAt: null,
+      error: null,
+      ...overrides,
+    };
+  }
+
+  function event(seq: number, kind: AgentRunEventDto["kind"] = "round"): AgentRunEventDto {
+    return { seq, at: seq, kind, summary: `e${seq}`, payload: null };
+  }
+
+  test("首帧全量帧整体替换 events;增量帧按 seq 去重追加", () => {
+    setConversationAgentRun("a", {
+      type: "agent_run",
+      run: runSummary(),
+      event: null,
+      events: [event(1), event(2)],
+    });
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1, 2]);
+
+    const running = runSummary({ rounds: 1 });
+    setConversationAgentRun("a", { type: "agent_run", run: running, event: event(3) });
+    expect(runs()["a"]!.run).toBe(running);
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1, 2, 3]);
+
+    // 同一 seq 的重放帧(重连补发)不重复追加
+    setConversationAgentRun("a", { type: "agent_run", run: running, event: event(3) });
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1, 2, 3]);
+    // 更旧的迟到帧同样丢弃
+    setConversationAgentRun("a", { type: "agent_run", run: running, event: event(2) });
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1, 2, 3]);
+    // 纯状态帧(event=null)不动流水
+    const finished = runSummary({ status: "succeeded", endedAt: 9 });
+    setConversationAgentRun("a", { type: "agent_run", run: finished, event: null });
+    expect(runs()["a"]!.run.status).toBe("succeeded");
+    expect(runs()["a"]!.events).toHaveLength(3);
+  });
+
+  test("run.id 变化即新一次运行,旧流水不续接", () => {
+    setConversationAgentRun("a", {
+      type: "agent_run",
+      run: runSummary(),
+      event: null,
+      events: [event(1), event(2)],
+    });
+    setConversationAgentRun("a", {
+      type: "agent_run",
+      run: runSummary({ id: "run-2" }),
+      event: event(1),
+    });
+    expect(runs()["a"]!.run.id).toBe("run-2");
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1]);
+  });
+
+  test("删除会话时运行流水一并驱逐", () => {
+    setConversationAgentRun("a", {
+      type: "agent_run",
+      run: runSummary(),
+      event: null,
+      events: [event(1)],
+    });
+    expect(runs()["a"]).toBeDefined();
+    evictConversations(["a"]);
+    expect(runs()["a"]).toBeUndefined();
   });
 });

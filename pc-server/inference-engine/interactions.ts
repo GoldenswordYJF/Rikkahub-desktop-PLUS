@@ -199,6 +199,27 @@ function dataUrlToInline(url: string): Record<string, JsonValue> {
   return { mime_type: parsed.mime, data: parsed.data };
 }
 
+/** Interactions 的 tools 数组:内置优先(google_search/url_context),否则函数工具
+ *  (与 generateContent 路的互斥语义一致);函数 schema 经 googleStripSchemaKeys 同一份
+ *  OpenAPI 子集净化。导出给 S9 工具发现行的轮边界刷新复用,保证首轮与刷新同源。 */
+export function interactionsToolsFromFunctionTools(
+  functionTools: any[],
+  modelItem: Model,
+): Array<Record<string, JsonValue>> {
+  const tools: Array<Record<string, JsonValue>> = [];
+  if (hasBuiltInTool(modelItem, "search")) {
+    tools.push({ type: "google_search" });
+  } else if (hasBuiltInTool(modelItem, "url_context") || hasBuiltInTool(modelItem, "urlContext")) {
+    tools.push({ type: "url_context" });
+  } else {
+    for (const declaration of googleFunctionDeclarations(functionTools)) {
+      if (!declaration) continue;
+      tools.push({ type: "function", name: declaration.name, description: declaration.description, parameters: declaration.parameters });
+    }
+  }
+  return tools;
+}
+
 /** Interactions 完整请求体。镜像安卓 InteractionsAPI.buildRequestBody。
  *  与 generateContent 路(buildGoogleRequestBody)的关键差异:历史 assistant 轮经
  *  interactionsStepsFromParts 从落库 parts 重建(签名保真——messagesForApi 的
@@ -239,17 +260,7 @@ export function buildInteractionsRequestBody(
 
   // tools 扁平数组:内置优先(google_search/url_context),否则函数工具(与 generateContent
   // 路的互斥语义一致);函数 schema 经 googleStripSchemaKeys 同一份 OpenAPI 子集净化。
-  const tools: Array<Record<string, JsonValue>> = [];
-  if (hasBuiltInTool(modelItem, "search")) {
-    tools.push({ type: "google_search" });
-  } else if (hasBuiltInTool(modelItem, "url_context") || hasBuiltInTool(modelItem, "urlContext")) {
-    tools.push({ type: "url_context" });
-  } else {
-    for (const declaration of googleFunctionDeclarations(functionTools)) {
-      if (!declaration) continue;
-      tools.push({ type: "function", name: declaration.name, description: declaration.description, parameters: declaration.parameters });
-    }
-  }
+  const tools = interactionsToolsFromFunctionTools(functionTools, modelItem);
 
   return {
     ...(systemContent && !hasImageOutput ? { system_instruction: apiContentText(systemContent) } : {}),
@@ -355,7 +366,10 @@ export function makeInteractionsDecoder(result: InteractionsStreamRoundResult, h
         toolCallId: callId,
         toolName: name,
         input: JSON.stringify(args),
-        approvalState: initialApprovalState(name, assistant, hooks.conversation, JSON.stringify(args)),
+        approvalState: initialApprovalState(name, assistant, hooks.conversation, JSON.stringify(args), {
+          toolCallId: callId,
+          ...(hooks.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+        }),
         ...(signature ? { metadata: { interactions_signature: signature } } : {}),
       });
     }
@@ -519,6 +533,15 @@ export async function streamInteractionsChatWithTools(
     }),
     headerTimeoutMs: () => 600_000,
     makeNonStreamBody: (requestBody) => ({ ...requestBody, stream: false }),
+    // S9 工具发现行:轮边界工具数组刷新由协调器注入(见 tool-loop 的 encodeNextBody)。
+    // 同 Claude:刷新成功后更新回放基线,避免再下一轮还原 tools。
+    refreshTools: hooks.refreshTools
+      ? (next) => {
+          const refreshed = hooks.refreshTools!(next);
+          if (refreshed) body = refreshed as Record<string, any>;
+          return refreshed;
+        }
+      : undefined,
     async readRound(response, sig, nonStream) {
       const result: InteractionsStreamRoundResult = { textOut: "", thinkingOut: "", functionCalls: [], replaySteps: [], usage: undefined, raw: "" };
       const decoder = makeInteractionsDecoder(result, hooks, assistant);

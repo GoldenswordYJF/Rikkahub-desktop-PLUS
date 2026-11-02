@@ -21,6 +21,7 @@ import {
   untrackDetachedChildPid,
 } from "./shell";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate";
+import { RESUME_BASH_DESCRIPTION_APPEND } from "../ops/resume-truncation";
 import type { WorkspaceToolDefinition } from "./types";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -153,6 +154,8 @@ export interface BashToolOptions {
   shellPath?: string;
   /** 截断落盘目录(PC 适配:工作区 tmp/)。缺省系统 tmpdir(pi 原行为)。 */
   tempFileDir?: string;
+  /** S6:截断提示带总量与 read/grep 续读指引(默认关 → 保持 pi 原文案)。 */
+  resumableOutput?: boolean;
 }
 
 const BASH_UPDATE_THROTTLE_MS = 100;
@@ -171,9 +174,11 @@ export function createBashTool(
   options?: BashToolOptions,
 ): WorkspaceToolDefinition<BashToolInput, BashToolDetails | undefined> {
   const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
+  const resumableOutput = options?.resumableOutput === true;
   return {
     name: "bash",
-    description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+    description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`
+      + (resumableOutput ? RESUME_BASH_DESCRIPTION_APPEND : ""),
     parameters: BASH_SCHEMA as unknown as Record<string, unknown>,
     async execute({ command, timeout }, signal?, onUpdate?) {
       const output = new OutputAccumulator({ tempFilePrefix: "pi-bash", tempFileDir: options?.tempFileDir });
@@ -246,13 +251,26 @@ export function createBashTool(
           details = { truncation, fullOutputPath: snapshot.fullOutputPath };
           const startLine = truncation.totalLines - truncation.outputLines + 1;
           const endLine = truncation.totalLines;
-          if (truncation.lastLinePartial) {
+          const fullPath = snapshot.fullOutputPath;
+          if (resumableOutput && fullPath) {
+            // S6:落盘提示升级为「总量 + 路径 + read 分页 + 文件内 grep」。
+            const total = `${truncation.totalLines} lines, ${formatSize(truncation.totalBytes)} total`;
+            const guidance = `page through it with the read tool (offset/limit) or grep within it instead of re-running the command`;
+            if (truncation.lastLinePartial) {
+              const lastLineSize = formatSize(output.getLastLineBytes());
+              text += `\n\n[Showing the last ${formatSize(truncation.outputBytes)} of line ${endLine} (that line is ${lastLineSize}; ${total}). Full output saved to ${fullPath}: ${guidance}.]`;
+            } else if (truncation.truncatedBy === "lines") {
+              text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(truncation.totalBytes)} total). Full output saved to ${fullPath}: ${guidance}.]`;
+            } else {
+              text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit; ${total}). Full output saved to ${fullPath}: ${guidance}.]`;
+            }
+          } else if (truncation.lastLinePartial) {
             const lastLineSize = formatSize(output.getLastLineBytes());
-            text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+            text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${fullPath}]`;
           } else if (truncation.truncatedBy === "lines") {
-            text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+            text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${fullPath}]`;
           } else {
-            text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+            text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${fullPath}]`;
           }
         }
         return { text, details };

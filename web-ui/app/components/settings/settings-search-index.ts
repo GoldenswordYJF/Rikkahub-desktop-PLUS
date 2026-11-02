@@ -81,6 +81,8 @@ const PAGE_KEYWORDS: Partial<Record<SettingsPageKey, string>> = {
   "data": "backup",
   "connectivity/server": "web_service",
   "connectivity/im": "im",
+  "experiments/companion": "companion",
+  "experiments/agent-bot": "agent_bot",
   "stats/logs": "logs",
   donate: "donate",
 };
@@ -115,6 +117,8 @@ const ROW_ENTRIES: readonly SettingsSearchEntry[] = [
   row("general/app", "general.opt.show_token_usage"),
   row("general/app", "general.opt.auto_scroll"),
   row("general/app", "general.opt.collapse_all_steps"),
+  row("general/app", "general.opt.tool_trace_compact"),
+  row("general/app", "general.opt.plan_panel", { keywords: "plan" }),
   row("general/app", "general.long_text_title"),
   row("general/app", "general.long_text_as_file", { keywords: "long_text" }),
   row("general/app", "general.long_text_threshold", { keywords: "long_text_threshold" }),
@@ -243,6 +247,7 @@ const ROW_ENTRIES: readonly SettingsSearchEntry[] = [
   row("extensions/mcp", "mcp.server.command"),
   row("extensions/mcp", "mcp.server.args"),
   row("extensions/mcp", "mcp.server.cwd"),
+  row("extensions/mcp", "mcp.server.sandbox_dirs", { keywords: "sandbox" }),
   row("extensions/mcp", "mcp.oauth.title"),
   row("extensions/mcp", "mcp.server.tools_title"),
   row("extensions/mcp", "mcp.server.headers", ADV),
@@ -362,6 +367,28 @@ const ROW_ENTRIES: readonly SettingsSearchEntry[] = [
   row("experiments/mood", "experiments.mood.timeline_title"),
   row("experiments/mood", "experiments.mood.timeline_empty"),
 
+  // 实验功能（AgentBot：自主循环 / 运行记录 / 传输重试）
+  row("experiments/agent-bot", "experiments.agent_bot.notice_title"),
+  row("experiments/agent-bot", "experiments.agent_bot.master_title"),
+  row("experiments/agent-bot", "experiments.agent_bot.enable", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.transport_retry", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.fold_loop", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.require_verified", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.max_replans", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.stall_repeat_limit", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.same_error_limit", { keywords: "agent_bot" }),
+
+  // 实验功能（桌面伴侣）
+  row("experiments/companion", "experiments.companion.notice_title"),
+  row("experiments/companion", "experiments.companion.master_title"),
+  row("experiments/companion", "experiments.companion.enable", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.bubbles", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.skin_title", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.skin_deepy", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.size_title", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.size_row", { keywords: "companion" }),
+  row("experiments/companion", "experiments.companion.pos_title", { keywords: "companion" }),
+
   // 数据管理
   row("data", "data.backup_title"),
   row("data", "data.sync_options_title", { keywords: "backup" }),
@@ -392,6 +419,7 @@ const ROW_ENTRIES: readonly SettingsSearchEntry[] = [
   row("connectivity/server", "data.sandbox_title", { keywords: "sandbox" }),
   row("connectivity/server", "data.sandbox_switch", { keywords: "sandbox" }),
   row("connectivity/server", "data.sandbox_measured", { keywords: "sandbox" }),
+  row("connectivity/server", "data.sandbox_extra_dirs", { keywords: "sandbox" }),
   row("connectivity/server", "data.web_listen_title", { keywords: "port" }),
   row("connectivity/server", "proxy.port_number", { keywords: "port" }),
   row("connectivity/server", "proxy.ua_title", { keywords: "user_agent" }),

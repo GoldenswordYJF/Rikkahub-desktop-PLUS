@@ -27,7 +27,7 @@ import { createAgentSession } from "../../pi/packages/coding-agent/src/core/sdk.
 
 import type { ToolDefinition } from "../../pi/packages/coding-agent/src/core/extensions/types.ts";
 import { SessionManager } from "../../pi/packages/coding-agent/src/core/session-manager.ts";
-import type { GenerationEventSink } from "../inference-engine/events";
+import type { GenerationEventSink, LoopDecision, LoopToolObservation } from "../inference-engine/events";
 import type { Message, Model, Provider } from "../foundation/types";
 import { piAgentDir } from "../foundation/paths";
 import { CodedError } from "../foundation/errors";
@@ -38,7 +38,10 @@ import { clearToolApprovalWaiters } from "../inference-engine/approval-gate";
 import type { PiSessionResources } from "./resources";
 import { seedPiSessionFromHistory, type EngineCompactionRecord } from "./context-encoder";
 import { sweepWorkspaceReservedNameArtifacts } from "../workspace/files";
+import type { ReadEvidenceHandle } from "../workspace/ops/read-dedup";
 import { reportError } from "../observability/app-errors";
+import { AgentLoopHaltError } from "../agent-loop/halt";
+import { errorSignatureOf } from "../agent-loop/controller";
 
 export interface PiGenerationContext {
   /** 生效 provider/model(调用方经 findModel 解析,providerOverwrite 已展开)。 */
@@ -76,6 +79,17 @@ export interface PiGenerationContext {
   resources?: PiSessionResources;
   /** customTools(生产侧 = 七个工作区工具 + 通用工具/MCP 桥;不传 = 纯对话)。 */
   tools?: ToolDefinition[];
+  /** S10:session 建立后、首次 prompt 前只激活这些工具名(全集仍注册在 registry)。
+   *  不传 = 全部激活,与引入前逐字一致(纯对话/子智能体/测试场景)。 */
+  activeToolNames?: string[];
+  /** S10:发现行轮边界刷新。pi turn_end(当前 assistant 消息的工具批已执行完、
+   *  下一次 LLM 请求前)同步调用;返回非 null 则 setActiveToolsByName——原生
+   *  "下一轮生效",且 Available tools 段随之重建。不传 = 无发现行。 */
+  onToolActivationBoundary?: () => string[] | null;
+  /** S4:读取去重的原文证据句柄。工具在 session 建立前构造,所以由 runner 在 prompt 前
+   *  挂探针、收尾时摘除;探针 = 「session.messages 里还有这条 read 全文」。不传 = 证据
+   *  不足,重复读取一律回全文(子智能体/纯测试场景)。 */
+  readEvidence?: ReadEvidenceHandle;
   /** 生成事件下沉(生产侧 = conversations/generation-apply 的应用器)。 */
   sink: GenerationEventSink;
   signal?: AbortSignal;
@@ -87,6 +101,14 @@ export interface PiGenerationContext {
    *  调用位、Codex 的 pending_input 排水位同构。不传 = 无 steering 能力(消息留在 FIFO
    *  队列收尾派发兜底)。回调由编排层实现(落库/队列联动在编排层,runner 零副作用)。 */
   onSteerBoundary?: () => string[];
+  /** 自主循环(S1):轮边界观察点。pi turn_start(每次即将发起 LLM 请求前)同步调用,
+   *  turn 从 1 起。只用于运行记录计数,不改生成语义。不传 = 无观测。 */
+  onRunBoundary?: (turn: number) => void;
+  /** 自主循环(S3):turn_end 判定表。toolResults 非空 = 工具批边界(有工具执行的回合),
+   *  为空 = 模型未调用工具的最终回合(完成校验)。返回 inject 经 session.steer() 注入下一轮
+   *  (与用户补发同一通道,不产 part);返回 halt 时中止会话并以 AgentLoopHaltError 上抛。 */
+  onToolRoundEnd?: (observations: LoopToolObservation[]) => LoopDecision;
+  onFinalCandidate?: () => LoopDecision;
 }
 
 /** 压缩产物的 DB 侧映射(runner 返回;orchestrator 负责落 conversation.engineCompactions)。
@@ -171,34 +193,111 @@ export async function runPiGeneration(ctx: PiGenerationContext): Promise<PiGener
       : {}),
   });
 
+  // S10:发现行只激活子集——未激活的 MCP 工具仍在 registry(下一轮可激活),不进
+  // 本轮请求。setActiveToolsByName 同时重建 Available tools 段;不传则 pi 默认全激活。
+  if (ctx.activeToolNames) session.setActiveToolsByName(ctx.activeToolNames);
+
   // steering 一次吸收全部:与聊天引擎 steerBoundary 整批排水、Codex pending_input
   // split_off(0) 同语义——多条插话 = 多个 user 气泡 + 一个 ai_2,不按轮次逐条滴灌。
   session.agent.steeringMode = "all";
 
+  // S4:重复读取去重的证据探针——只看 read 工具结果文本。pi 压缩后 agent.state.messages
+  // 被 sessionManager.buildSessionContext() 换成效压缩视图,原全文消失、标记失配,自然回全文。
+  if (ctx.readEvidence) {
+    ctx.readEvidence.probe = (marker) =>
+      session.messages.some(
+        (message) =>
+          message.role === "toolResult"
+          && message.toolName === "read"
+          && message.content.some((block) => block.type === "text" && block.text.includes(marker)),
+      );
+  }
+
   const bridge = createPiEventBridge();
+  // 自主循环(S1):pi 无显式轮序号,runner 自数 turn_start(每次即将发 LLM 请求)。
+  let turnCount = 0;
+  // 自主循环(S3):turn_end 判定表。工具参数只在 tool_execution_start 出现一次,
+  // 用它建 id → {name,args} 映射,turn_end 的 toolResults 再补输出与错误签名。
+  const pendingCalls = new Map<string, { name: string; args: string }>();
+  // 判定结果放在对象里:回调赋值不会被 TS 的控制流分析当成"永远是 null"。
+  const haltState: {
+    current: { status: "stalled" | "awaiting_user" | "exhausted" | "failed"; reason: string } | null;
+  } = { current: null };
   const unsubscribe = session.subscribe((event) => {
     for (const generationEvent of bridge.handle(event)) ctx.sink(generationEvent);
+    // 自主循环(S1):轮边界观察点。turn_start = 即将发起下一次 LLM 请求,与聊天引擎
+    // 工具循环的"发请求前"同语义;只计数,不改生成语义。
+    if (event.type === "tool_execution_start") {
+      pendingCalls.set(event.toolCallId, { name: event.toolName, args: JSON.stringify(event.args ?? {}) });
+    }
+    if (event.type === "turn_start") {
+      turnCount += 1;
+      ctx.onRunBoundary?.(turnCount);
+    }
+    // S10:工具发现轮边界——turn_end 时工具批已执行完,此刻提升 pending 并重设激活集,
+    // agent-loop 的 prepareNextTurn 每轮现读 state.tools,下一次请求即携带新 schema。
+    // 与下方 steering 同点:都是"本轮收束、下轮未发"的唯一安全改写窗口。
+    if (event.type === "turn_end" && ctx.onToolActivationBoundary) {
+      const names = ctx.onToolActivationBoundary();
+      if (names) session.setActiveToolsByName(names);
+    }
+    if (event.type !== "turn_end") return;
     // steering 轮边界(用户问题②):turn_end = 当前 assistant 消息结束、其工具批已执行完,
     // agent-loop 紧接着 getSteeringMessages 排水。pi 的事件分发是顺序 await 各监听器
     // (agent.ts _emit),本回调里 steer() 入队一定先于那次排水——注入零延迟、零竞态。
     // 编排层在同一调用里完成数据层分裂(定格 ai_1 / 落 steer user / 开 ai_2 / 换绑),
     // 于是分裂时刻与 pi 注入时刻逐字同点。此前用 1s 定时器轮询,分裂落在模型仍在流式
     // 的任意时刻,ai_1 多半还是空占位(2026-09-20 用户实测 2-1)。
-    if (event.type === "turn_end" && ctx.onSteerBoundary) {
+    if (ctx.onSteerBoundary) {
       const texts = ctx.onSteerBoundary();
-      if (texts.length === 0) return;
-      // 注入即分段:编排层已换绑落点,桥的终局文本/保真序号切到新气泡口径。
-      bridge.beginSegment();
-      for (const text of texts) {
-        // steer() 内部会做 skill/模板展开——expandPromptTemplates 已在 prompt 侧关闭,
-        // 展开只作用于 "/skill:" 前缀等命令形态,会话 UX 不产生该形态,恒等。
-        void session.steer(text).catch(() => {
-          // 会话已收束(dispose 竞态)时 steer 拒绝:消息已在编排层落库并出队,
-          // FIFO 兜底路径不再持有它——按注入失败上报,排查线索进错误中心。
-          reportError("provider", "info", "补发消息注入工作区会话失败(会话可能已收束)", undefined, "pi_steer_failed");
-        });
+      if (texts.length > 0) {
+        // 注入即分段:编排层已换绑落点,桥的终局文本/保真序号切到新气泡口径。
+        bridge.beginSegment();
+        for (const text of texts) {
+          // steer() 内部会做 skill/模板展开——expandPromptTemplates 已在 prompt 侧关闭,
+          // 展开只作用于 "/skill:" 前缀等命令形态,会话 UX 不产生该形态,恒等。
+          void session.steer(text).catch(() => {
+            // 会话已收束(dispose 竞态)时 steer 拒绝:消息已在编排层落库并出队,
+            // FIFO 兜底路径不再持有它——按注入失败上报,排查线索进错误中心。
+            reportError("provider", "info", "补发消息注入工作区会话失败(会话可能已收束)", undefined, "pi_steer_failed");
+          });
+        }
+        // 用户补发优先级最高:本回合不再叠加判定表提示(下一回合照常判定)。
+        return;
       }
     }
+    // 自主循环(S3):判定表。有工具结果 = 工具批边界;没有 = 模型本轮未调用工具的最终回合。
+    if (!ctx.onToolRoundEnd && !ctx.onFinalCandidate) return;
+    const observations: LoopToolObservation[] = event.toolResults.map((result) => {
+      const call = pendingCalls.get(result.toolCallId);
+      pendingCalls.delete(result.toolCallId);
+      const outputText = result.content
+        .filter((block): block is { type: "text"; text: string } => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      return {
+        toolCallId: result.toolCallId,
+        toolName: result.toolName,
+        arguments: call?.args ?? "",
+        outputText,
+        errorSignature: result.isError ? errorSignatureOf(result.toolName, outputText) : null,
+      };
+    });
+    const decision: LoopDecision | undefined =
+      observations.length > 0 ? ctx.onToolRoundEnd?.(observations) : ctx.onFinalCandidate?.();
+    if (!decision || decision.action === "continue") return;
+    if (decision.action === "halt") {
+      // 记录后中止会话:pi 的 runLoop 会正常收束(agent_end),runner 在 prompt 返回后
+      // 以类型化错误上抛给协调器——不在这里 throw(事件监听器里抛会被 pi 吞掉或转成
+      // 工具错误),也不清空已生成内容。
+      haltState.current = { status: decision.status, reason: decision.reason };
+      void session.abort();
+      return;
+    }
+    // 判定表提示走 steering 通道,但不 beginSegment(不是用户气泡,不切分消息)。
+    void session.steer(decision.text).catch(() => {
+      reportError("provider", "info", "自主循环提示注入工作区会话失败(会话可能已收束)", undefined, "pi_loop_inject_failed");
+    });
   });
   const onAbort = () => {
     void session.abort();
@@ -218,12 +317,18 @@ export async function runPiGeneration(ctx: PiGenerationContext): Promise<PiGener
   } finally {
     ctx.signal?.removeEventListener("abort", onAbort);
     unsubscribe();
+    // S4:摘除证据探针——句柄可能被同一编排层的下一轮复用,残留会读到已销毁的 session。
+    if (ctx.readEvidence) ctx.readEvidence.probe = undefined;
     session.dispose();
     // 审批等待者兜底清扫:正常路径下等待者随用户决定/中止即刻注销,这里只防实现
     // 疏漏把 execute 的 Promise 泄漏成永久悬挂(approval-gate 头注)。
     // 按本生成的作用域清扫:子智能体的子生成不拥有父会话的等待者。
     clearToolApprovalWaiters(ctx.conversationId, ctx.approvalScopeId);
   }
+
+  // 自主循环(S3):判定表终局。判定在 turn_end 得出、会话已中止,这里以类型化错误
+  // 交给协调器走"保留计划与进度、交给人处理"的收尾(不是上游失败)。
+  if (haltState.current) throw new AgentLoopHaltError(haltState.current.status, haltState.current.reason);
 
   const capturedCompactions = captureRoundCompactions(manager, seededEntryIds, seeded.entryIdsByMessageId);
 

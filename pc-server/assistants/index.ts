@@ -55,6 +55,7 @@ export function defaultAssistant(): Assistant {
     enableTimeReminder: false,
     allowConversationSystemPrompt: false,
     allowConversationPromptInjection: false,
+    enableToolDiscovery: false,
   };
 }
 

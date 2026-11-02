@@ -19,6 +19,7 @@ import { toast } from "sonner";
 
 import i18n from "~/i18n";
 import api, { ApiError, sse } from "~/services/api";
+import { bumpAgentRunEpoch, resyncLatestAgentRun } from "~/stores/agent-run-sync";
 import { useAppStore } from "~/stores/app-store";
 import {
   applyConversationNodesPage,
@@ -30,12 +31,15 @@ import {
   applyPolledConversationSnapshot,
   releaseConversationEntry,
   retainConversationEntry,
+  setConversationAgentRun,
   setConversationEngineStatus,
   setConversationError,
   setConversationSubscribing,
+  trimConversationAgentRunWindow,
   useConversationStore,
 } from "~/stores/conversation-store";
 import type {
+  AgentRunPushDto,
   ConversationDto,
   ConversationErrorEventDto,
   ConversationNodesPageDto,
@@ -262,6 +266,9 @@ function syncPolling(id: string, record: StreamRecord): void {
 function openStream(id: string, record: StreamRecord, options?: { negotiate?: boolean }): void {
   const controller = new AbortController();
   record.controller = controller;
+  // 新连接 = 运行流水的读取代次前进:在途的历史分页/缺口重同步响应全部作废,
+  // 首帧 agent-run 快照会整窗替换 latest(见 stores/agent-run-sync.ts)。
+  bumpAgentRunEpoch(id);
   setConversationSubscribing(id, true);
   setConversationError(id, null);
   // 引擎状态以"最新帧覆盖"为准:重连时清掉旧残影(断连期间错过 busy:false 帧
@@ -287,6 +294,19 @@ function openStream(id: string, record: StreamRecord, options?: { negotiate?: bo
         // 只进 engineStatus 侧栈,不触碰 detail/协商/轮询。
         if (event === "engine-status") {
           setConversationEngineStatus(id, data as unknown as EngineStatusEventDto);
+          return;
+        }
+
+        // 自主循环运行流水(S1):同样按事件名分流,载荷自带 type=agent_run 以便 GET 快照复用。
+        // 连接首帧带全量 events,增量帧带单条 event;开关关闭时服务端不推本帧。
+        if (event === "agent-run") {
+          const push = data as unknown as AgentRunPushDto;
+          if (push?.type === "agent_run") {
+            const outcome = setConversationAgentRun(id, push);
+            // 增量与本地尾部断档:不猜补,重新 GET 最新快照整窗替换。失败静默,
+            // 不打扰生成(观测永远尽力而为)。
+            if (outcome === "gap") void resyncLatestAgentRun(id);
+          }
           return;
         }
 
@@ -405,6 +425,8 @@ function restartStream(id: string, record: StreamRecord): void {
 
 function closeStream(id: string, record: StreamRecord): void {
   records.delete(id);
+  // 无订阅即一代结束:作废在途分页(含离开窗格后才返回的迟到页)。
+  bumpAgentRunEpoch(id);
   if (record.closeTimer !== null) {
     clearTimeout(record.closeTimer);
     record.closeTimer = null;
@@ -417,6 +439,8 @@ function closeStream(id: string, record: StreamRecord): void {
     record.pollTimer = null;
   }
   setConversationEngineStatus(id, { busy: false }); // 无订阅即无来源,不留残影
+  // 用户加载过的更早页回落到固定窗口:面板不在场时不长期保留完整事件流。
+  trimConversationAgentRunWindow(id);
   releaseConversationEntry(id);
 }
 

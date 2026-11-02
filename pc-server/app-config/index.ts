@@ -22,6 +22,7 @@ export function selectAppConfig(settings: Settings): AppConfig {
     displaySetting: settings.displaySetting,
     preferredPort: settings.preferredPort,
     sandboxRestricted: settings.sandboxRestricted,
+    sandboxExtraWritableDirs: settings.sandboxExtraWritableDirs,
     workspaceLastPermissionPreset: settings.workspaceLastPermissionPreset,
     keybindings: settings.keybindings,
     webServerJwtEnabled: settings.webServerJwtEnabled,

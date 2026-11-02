@@ -176,7 +176,9 @@ export function mapAvatarType(value: JsonValue, mapping: Record<string, string>)
 export const PC_ONLY_DISPLAY_SETTING_FIELDS: ReadonlySet<string> = new Set([
   "chatFontFamilyCss", "uiFontSize", "chatFontSize", "chatInputHeight",
   "themeMode", "colorTheme", "userThemes", "language", "collapseAllSteps",
+  "toolTraceCompact", "planPanel",
   "pcPasteLongTextAsFile", "pcPasteLongTextThreshold",
+  "showCompanion", "companionSkin", "companionBubbles", "companionScale", "companionPos",
 ]);
 
 /** PC 独有的 MCP 传输:stdio 要子进程、builtin 跑在 pc-server 进程里,安卓两者都不存在。
@@ -221,6 +223,8 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
         // 安卓对齐批6:allowConversationSystemPrompt 已是安卓正式字段(Assistant.kt),
         // 不再 strip——此前误删导致 PC→APP 后所有助手的会话级系统提示词开关归 false。
         delete fixed.mcpToolOverrides;
+        // S9(PC 专属):工具发现行开关安卓没有对应字段,导出时剔除;PC→PC 保留。
+        delete fixed.enableToolDiscovery;
         if (pcOnlyServerIds.size > 0 && Array.isArray(fixed.mcpServers)) {
           fixed.mcpServers = fixed.mcpServers.filter((serverId: any) => !pcOnlyServerIds.has(String(serverId)));
         }
@@ -276,9 +280,18 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
     // sandboxRestricted 是机器级安全姿态(APP 无此概念;容器/安卓不吃这个开关),
     // 跨端剥离;pc-backup(PC→PC)保留,换机恢复后下次启动生效。
     delete copy.sandboxRestricted;
+    // 沙盒额外可写目录是 Windows 受限沙盒的机器级声明(安卓无低完整性机制、
+    // 目录路径也不通用),跨端剥离;pc-backup(PC→PC)保留。
+    delete copy.sandboxExtraWritableDirs;
     // subagent 是 PC-only 能力(安卓端无 subagent_dispatch、无对应设置字段),
     // 跨端剥离;pc-backup(PC→PC)保留。
     delete copy.subagent;
+    // 工作区工具面契约开关是 PC-only(安卓无工作区工具、无行号/revision 契约),
+    // 跨端剥离;pc-backup(PC→PC)保留。
+    delete copy.workspaceTools;
+    // 自主循环是 PC 运行底座上的实验(安卓无运行记录表/判定表),跨端剥离;
+    // pc-backup(PC→PC)保留。
+    delete copy.agentLoop;
     // 记忆实验是 PC-only 语义（安卓不认识分级/墓碑/延迟清除），跨端剥离避免把
     // 实验开关和状态带到 APP；pc-backup（PC→PC）保留。
     delete copy.memoryExperimentSettings;
@@ -460,7 +473,7 @@ export function filterMessagePartsForAndroid(
  *  steer 插话用户消息的轻量标注(仅 PC 用于将来可选 UI 标记),同样不得流入安卓。
  *  compaction_cut 是非破坏式压缩的记忆边界标记(对话引擎手动压缩),安卓无此语义。
  *  pinned 是用户钉住关键消息的标记(压缩时逐字注入),安卓无此能力。 */
-export const PC_ONLY_ANNOTATION_TYPES: ReadonlySet<string> = new Set(["model_call_error", "pi-fidelity", "compaction_boundary", "compaction_cut", "steered", "pinned"]);
+export const PC_ONLY_ANNOTATION_TYPES: ReadonlySet<string> = new Set(["model_call_error", "pi-fidelity", "compaction_boundary", "compaction_cut", "steered", "pinned", "agent_loop_halt"]);
 
 /** A-2:导出方向的注解清洗。只保留"带字符串判别符且非 PC-only"的注解——缺判别符的
  *  遗留脏对象与 PC-only 类型都会让安卓多态解码即炸;安卓自有/未来新增类型原样透传。 */

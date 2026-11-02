@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 
-import { Code2, Folder, FolderTree, ImagePlus, PanelRight, SquareTerminal } from "lucide-react";
+import { Code2, Folder, FolderTree, ImagePlus, ListChecks, PanelRight, SquareTerminal } from "lucide-react";
 
 import Markdown from "~/components/markdown/markdown";
 import { MediaStudioPanel } from "~/components/media-studio/media-studio-panel";
@@ -10,6 +10,7 @@ import { cn } from "~/lib/utils";
 
 import { getCodePreviewLanguage } from "./code-preview-language";
 import { ConversationFilesPanel } from "./conversation-files-panel";
+import { PlanPanel } from "./plan-panel";
 import { SshTerminalPanel } from "./ssh-terminal-panel";
 import { WorkspaceFilesPanel } from "./workspace-files-panel";
 import type { WorkbenchPanel } from "./workbench-context";
@@ -243,6 +244,15 @@ const PANEL_RENDERERS: Record<string, WorkbenchPanelRenderer> = {
       <ConversationFilesRenderer panel={panel} activeConversationId={activeConversationId} />
     ),
   },
+  // 计划面板(实验):payload 带 conversationId 时锁那个会话,否则跟随当前聚焦会话——
+  // 与文件面板同一口径,换会话不会看见上一个会话的计划。
+  "plan": {
+    render: (panel, activeConversationId) => (
+      <PlanPanel
+        conversationId={readStringField(panel.payload, "conversationId") || activeConversationId}
+      />
+    ),
+  },
   // 工作区文件面板(M3-5,§4.4)——保留旧入口,工作区容器仍可直接打开只读树。
   "workspace-files": {
     render: (panel) => <WorkspaceFilesPanel workspaceId={readStringField(panel.payload, "workspaceId")} />,
@@ -272,6 +282,7 @@ const TYPE_LABEL_KEYS: Record<string, string> = {
   "code-preview": "workbench.type_labels.code_preview",
   "media-studio": "workbench.type_labels.media_studio",
   "ssh-terminal": "workbench.type_labels.ssh_terminal",
+  "plan": "workbench.type_labels.plan",
 };
 
 const TYPE_ICONS: Record<string, React.ComponentType<{ className?: string; strokeWidth?: number }>> = {
@@ -280,6 +291,7 @@ const TYPE_ICONS: Record<string, React.ComponentType<{ className?: string; strok
   "code-preview": Code2,
   "media-studio": ImagePlus,
   "ssh-terminal": SquareTerminal,
+  "plan": ListChecks,
 };
 
 export function WorkbenchHost({ panel, onClose, className, activeConversationId }: WorkbenchHostProps) {

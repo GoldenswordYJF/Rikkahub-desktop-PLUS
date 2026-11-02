@@ -65,7 +65,19 @@ Windows 便携版在本仓库的 [Releases](https://github.com/ODO-TECH/Rikkahub
 
 右侧工作台按「本次改动 / 工作区 / 附件 / 产出」四个页签组织会话涉及的文件。代码用 Shiki 高亮，PDF 内联渲染（上限 50 MB），HTML/SVG 走空 sandbox 的 srcDoc，音视频直接播放。文件可以在应用内编辑并按 Ctrl+S 落盘；磁盘上的版本被改动过时会提示 409，由你选择重载或覆盖。此外支持上传下载，AGENTS.md 也可以就地编辑。`Ctrl/Cmd+Shift+E` 可以从任意附件或工具调用把对应文件唤到侧栏。
 
-模型拿到的工作区工具是 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls` 七个，与安卓端的能力面一致。除此之外还有网页搜索与抓取、剪贴板、时间、TTS、加载技能、保存记忆，以及 `ask_user` 交互式提问卡（多选加自由文本）。`subagent_dispatch` 把并行子任务当作一个普通工具接入，走同一套审批，卡片上实时显示子任务的 token 消耗和预算；该功能默认关闭，深度固定为 1，并发 1 到 8 可调。
+模型拿到的工作区工具是 `read`、`read_files`、`write`、`edit`、`bash`，无 bash 的机器上另有 `grep`、`find`、`ls`，与安卓端的能力面一致。除此之外还有网页搜索与抓取、剪贴板、时间、TTS、加载技能、保存记忆，以及 `ask_user` 交互式提问卡（多选加自由文本）。`subagent_dispatch` 把并行子任务当作一个普通工具接入，走同一套审批，卡片上实时显示子任务的 token 消耗和预算；该功能默认关闭，深度固定为 1，并发 1 到 8 可调。
+
+工作区工具面另有一组实验契约，默认全部关闭；关闭时 `read` / `edit` 的输出与行为保持原样。开启后聊天与 pi 两条通路同时生效：
+
+| 开关 | 作用 |
+| --- | --- |
+| `workspaceTools.readContract` | `read` / `read_files` 输出带 `N\|` 行号、`revision=` 与 `nextOffset=` / `end of file` 续读位；`edit` 增加 `expectedRevision`（版本不符拒绝写入并返回当前 revision）与 `dryRun`（只出 diff 不落盘）。 |
+| `workspaceTools.readDedup` | 同一会话内同参数重读未变文件时，若上一份全文仍在本轮上下文里，返回一行 `[unchanged: … ref #…]`；压缩后或证据不足一律回全文。 |
+| `workspaceTools.searchCoverage` | `grep` / `find` / `ls` 达上限时在尾部写明扫描是否完整、缺口原因与下一步建议，不再给出容易误读的总数断言。 |
+| `workspaceTools.resumableOutput` | 超长 `bash` 输出落盘后给出总行数、字节数与 `read` / `grep` 续读指引；`grep` / `find` / `ls` 截断时同样落盘。 |
+| `workspaceTools.mcpDescriptionCap` | MCP 工具 description 超过 1500 字符时截断并保留关键约束，减少常驻体积。 |
+
+工具发现行用助手级开关 `enableToolDiscovery`（默认 `false`）：开启后首轮只携带核心工具与 `search_tools`，MCP 工具按需发现、下一轮才进入工具数组，激活集按会话持久化；服务器被禁用或删除后，对应激活项会自动清理。上述全局契约与助手字段目前通过 HTTP 接口配置，设置页尚未提供入口。
 
 ### SSH 远程工作区
 
@@ -236,7 +248,7 @@ docker run -d --name rikkahub-plus --restart unless-stopped \
   -p 11451:11451 \
   -e RIKKAHUB_PASSWORD='换成你的密码' \
   -v "$PWD/pc-data:/app/pc-data" \
-  rikkahub-desktop-plus:0.1.4
+  rikkahub-desktop-plus:0.1.5
 ```
 
 只有 `/app/pc-data` 必须挂载。不要把宿主目录挂到 `/app` 或 `/app/web-ui`，那会覆盖镜像里的程序文件。要交给 agent 使用的 NAS 目录，通过挂载表划边界：
@@ -303,6 +315,20 @@ Kelivo 方向是双向的：导入支持 8 类数据，导出遵循 schema v3 �
 
 桌面默认端口是 `17455`，被占用时按顺序尝试 20 个端口，都不可用则退回系统分配；容器固定 `11451` 且不重试。
 
+### 工具面开关（PC 专属，默认关闭）
+
+存储在 `state.json` 的 `settings.workspaceTools`，逐项布尔、默认全 `false`。用 `POST /api/settings/workspace-tools` 提交要改的字段（整单校验，任一字段非布尔即 400），改动对聊天与 pi 两条通路同时生效。安卓导出会整块剥离，PC→PC 备份保留。
+
+| 字段 | 作用 |
+| --- | --- |
+| `readContract` | `read` / `read_files` 的行号、`revision`、续读位；`edit` 的 `expectedRevision` 与 `dryRun` |
+| `readDedup` | 同会话同参数重读的 `[unchanged: … ref #…]` 短路（证据不足回全文） |
+| `searchCoverage` | `grep` / `find` / `ls` 的覆盖率尾部摘要 |
+| `resumableOutput` | 截断结果落盘与续读指引 |
+| `mcpDescriptionCap` | MCP description 超过 1500 字符时截断 |
+
+工具发现行另由助手级字段 `enableToolDiscovery` 控制（默认 `false`），随完整助手对象经 `POST /api/settings/assistant/detail` 保存。设置页目前没有这两组开关的入口。
+
 ## 版本记录
 
 0.0.2 之后合入了 393 个文件、5.6 万行新增。按版本看：
@@ -318,6 +344,7 @@ Kelivo 方向是双向的：导入支持 8 类数据，导出遵循 schema v3 �
 | **0.1.2** | Windows 受限沙盒启用链路修复：后端不是由桌面壳拉起时「立即重启」原本是空操作，现在开关真正生效；关闭沙盒需退出重开的限制在界面上如实提示 |
 | **0.1.3** | 内置 `@rikkahub/fetch`（第三种 MCP 传输：进程内，不依赖供应商，HTML 转正文 Markdown，出站拦回环/内网/云元数据）、实验功能「心情」（每轮异步判定 + 按置信度与每日上限注入，默认关闭）、受限沙盒下本地 MCP 可用（npm/uv/pip 缓存改道 + 初始化超时 60 秒）、更新检查以界面版本为准 |
 | **0.1.4** | 修复设置页卡顿：移除弹窗全屏实时模糊，鼠标移动不再反复重采样背景，交互恢复到约 60fps；背景仍压暗，顶带窗控保持清晰可点 |
+| **0.1.5** | 工作区工具面实验契约（默认全关）：`read` 行号/revision/续读、`edit` 版本前置与 dryRun、`read_files` 批量读、重读去重、搜索覆盖率摘要、截断结果落盘续读、MCP 描述截断、`search_tools` 按需发现；受限沙盒支持声明额外可写目录（全局 + 每个 stdio MCP 服务器），重启生效，撤销声明自动还原 |
 
 同批修复里值得一提的：微信「已连接但收不到消息」（入站消息被误判为机器人回声）、点击停止后排队项悬挂导致 IM 串行回复链冻结、导入手机备份重置 PC 专属配置、压缩模型未配置时误兜底到 `gpt-4o-mini`、压缩后上下文用量不降反升，以及 SSH 凭据声称不导出安卓而实际从未剥离（已修复并有测试锁定）。
 

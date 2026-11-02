@@ -96,4 +96,70 @@ describe("inlineMcpToolSchema — $ref 内联展开", () => {
     expect(result.properties.remote).toEqual({});
     expect(JSON.stringify(result)).not.toContain("$ref");
   });
+
+  // ----- S8:memo(同一子树只展开一次) -----
+
+  test("memo:同一 $ref 跨 occurrence 只展开一次,共享同一份只读子树", () => {
+    const result = inlineMcpToolSchema(json(`{
+      "type": "object",
+      "properties": {
+        "left": {"$ref": "#/$defs/A"},
+        "right": {"$ref": "#/$defs/A", "description": "right override"}
+      },
+      "$defs": {
+        "A": {"type": "object", "properties": {"leaf": {"$ref": "#/$defs/B"}}},
+        "B": {"type": "string", "enum": ["x", "y"]}
+      }
+    }`)) as Record<string, any>;
+    // 同级覆盖仍然生效(description 只在 right 上)。
+    expect(result.properties.left).toEqual({ type: "object", properties: { leaf: { type: "string", enum: ["x", "y"] } } });
+    expect(result.properties.right.description).toBe("right override");
+    // 共享证据:嵌套子树是同一个对象引用,不是两次独立展开。
+    expect(result.properties.left.properties).toBe(result.properties.right.properties);
+    expect(result.properties.left.properties.leaf).toBe(result.properties.right.properties.leaf);
+  });
+
+  test("memo:循环引用在多处引用时仍各自截断,不因缓存泄漏完整递归体", () => {
+    const result = inlineMcpToolSchema(json(`{
+      "type": "object",
+      "properties": {
+        "a": {"$ref": "#/$defs/Node"},
+        "b": {"$ref": "#/$defs/Node"}
+      },
+      "$defs": {
+        "Node": {
+          "type": "object",
+          "properties": {"children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}}
+        }
+      }
+    }`)) as Record<string, any>;
+    const expected = { type: "object", properties: { children: { type: "array", items: { type: "object" } } } };
+    expect(result.properties.a).toEqual(expected);
+    expect(result.properties.b).toEqual(expected);
+  });
+
+  test("memo:菱形引用(共享定义再互引)展开结果与无 memo 语义一致", () => {
+    const result = inlineMcpToolSchema(json(`{
+      "type": "object",
+      "$defs": {
+        "Base": {"type": "object", "properties": {"id": {"type": "integer"}}},
+        "Left": {"type": "object", "properties": {"base": {"$ref": "#/$defs/Base"}}},
+        "Right": {"type": "object", "properties": {"base": {"$ref": "#/$defs/Base"}}},
+        "Both": {"type": "object", "properties": {
+          "left": {"$ref": "#/$defs/Left"},
+          "right": {"$ref": "#/$defs/Right"}
+        }}
+      },
+      "properties": {"both": {"$ref": "#/$defs/Both"}}
+    }`)) as Record<string, any>;
+    const base = { type: "object", properties: { id: { type: "integer" } } };
+    expect(result.properties.both).toEqual({
+      type: "object",
+      properties: {
+        left: { type: "object", properties: { base } },
+        right: { type: "object", properties: { base } },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("$ref");
+  });
 });

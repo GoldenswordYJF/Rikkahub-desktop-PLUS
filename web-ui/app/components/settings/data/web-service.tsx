@@ -11,6 +11,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Notice } from "~/components/ui/notice";
 import { StatusBadge } from "~/components/ui/status-badge";
+import { Textarea } from "~/components/ui/textarea";
 import {
   clearWebAuthToken,
   fetchWebAuthStatus,
@@ -247,6 +248,36 @@ export function WebServiceSection({
     : sandbox?.measured === "unknown"
       ? t("settings:data.sandbox_badge_unknown")
       : t("settings:data.sandbox_badge_not_enforced");
+
+  // ── 沙盒额外可写目录(全局):技能调用的外部工具目录等。启动编排阶段才标注,
+  //    所以保存后要重启才生效;从列表删掉的目录会在下次启动还原为 Medium(只读)。──
+  const persistedSandboxDirs = (settings.sandboxExtraWritableDirs ?? []).join("\n");
+  const [sandboxDirsDraft, setSandboxDirsDraft] = React.useState(persistedSandboxDirs);
+  const [sandboxDirsSaving, setSandboxDirsSaving] = React.useState(false);
+  React.useEffect(() => {
+    setSandboxDirsDraft(persistedSandboxDirs);
+  }, [persistedSandboxDirs]);
+  const saveSandboxDirs = React.useCallback(async (): Promise<boolean> => {
+    const dirs = sandboxDirsDraft
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    setSandboxDirsSaving(true);
+    try {
+      const result = await api.post<{ dirs: string[] }>("settings/sandbox-extra-dirs", { dirs });
+      patchSettingsLocal({ sandboxExtraWritableDirs: result.dirs });
+      setSandboxDirsDraft(result.dirs.join("\n"));
+      toast.success(t("settings:data.sandbox_extra_dirs_saved"));
+      return true;
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t("settings:data.sandbox_extra_dirs_failed"),
+      );
+      return false;
+    } finally {
+      setSandboxDirsSaving(false);
+    }
+  }, [sandboxDirsDraft, t]);
 
   // —— 访问密码:状态经独立端点 /api/web-auth/status(只回布尔,不含哈希)。——
   const [webAuthStatus, setWebAuthStatus] = React.useState<WebAuthStatus | null>(null);
@@ -511,6 +542,33 @@ export function WebServiceSection({
               }
             />
           </SettingsRows>
+          {/* 沙盒例外:技能调用的外部工具目录等。声明在配置文件里,标注由下次启动的
+              Medium 准备进程执行——运行中的低完整性进程无权给自己扩权。 */}
+          <SettingsField
+            className="mt-4"
+            label={t("settings:data.sandbox_extra_dirs")}
+            description={t("settings:data.sandbox_extra_dirs_desc")}
+            trailing={
+              <Button
+                type="button"
+                size="compact"
+                variant="tertiary"
+                disabled={sandboxDirsSaving}
+                onClick={() => void saveSandboxDirs()}
+              >
+                {sandboxDirsSaving ? <Loader2 className="animate-spin" /> : null}
+                {t("settings:data.sandbox_extra_dirs_save")}
+              </Button>
+            }
+          >
+            <Textarea
+              value={sandboxDirsDraft}
+              onChange={(event) => setSandboxDirsDraft(event.target.value)}
+              placeholder={t("settings:data.sandbox_extra_dirs_placeholder")}
+              className="field-sizing-fixed h-20 max-h-40 overflow-y-auto font-mono text-xs"
+              spellCheck={false}
+            />
+          </SettingsField>
           {/* 后端的差异说明(探针失败原因、各目录标注结果、降级原因)——只在受限档
               且有事可说时出现,是最诚实的故障定位入口。 */}
           {sandbox.tier === "restricted" && sandbox.notes.length > 0 ? (

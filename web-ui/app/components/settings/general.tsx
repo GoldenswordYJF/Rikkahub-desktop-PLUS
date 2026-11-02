@@ -43,6 +43,7 @@ interface PageProps {
 
 // 「显示思考内容」不在此列:思考卡流式中恒展开(字段保留透传,PC 不再读取)。
 // 「Enter 发送」在快捷键页。
+// 第三项是可选说明:只给「不只是视觉开关」的项用,普通显示开关沿用无说明的排布。
 const DISPLAY_TOGGLES = [
   ["showUserAvatar", "settings:general.opt.show_user_avatar"],
   ["showModelName", "settings:general.opt.show_model_name"],
@@ -50,6 +51,11 @@ const DISPLAY_TOGGLES = [
   ["showAssistantBubble", "settings:general.opt.show_assistant_bubble"],
   ["showTokenUsage", "settings:general.opt.show_token_usage"],
   ["enableAutoScroll", "settings:general.opt.auto_scroll"],
+  // 工具调用折成一行:默认开(与上排一样是「不写即开」),关掉回到每步带内联预览的旧形态。
+  ["toolTraceCompact", "settings:general.opt.tool_trace_compact"],
+  // 计划面板:默认开。它比上面几项多做一件事——向模型挂上 update_plan 工具,
+  // 关掉后模型不再发布新计划,但历史里已写下的计划照常显示(面板读消息流,不读开关)。
+  ["planPanel", "settings:general.opt.plan_panel", "settings:general.opt.plan_panel_hint"],
 ] as const;
 
 const FONT_PREVIEW_FALLBACK = '"Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif';
@@ -289,10 +295,11 @@ export function AppSection({ settings }: PageProps) {
     <SettingsStack>
       <SettingsGroup title={t("settings:general.display_title")}>
         <SettingsRows>
-          {DISPLAY_TOGGLES.map(([key, labelKey]) => (
+          {DISPLAY_TOGGLES.map(([key, labelKey, descriptionKey]) => (
             <SettingsSwitchRow
               key={key}
               label={t(labelKey)}
+              description={descriptionKey ? t(descriptionKey) : undefined}
               checked={display[key] !== false}
               onCheckedChange={(checked) => patchDisplay({ [key]: checked })}
             />

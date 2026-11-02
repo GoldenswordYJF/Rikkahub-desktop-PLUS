@@ -84,6 +84,10 @@ export function workspaceReconTitle(toolName: string, input: string, t: TFunctio
 export function workspaceReadTitle(toolName: string, input: string, t: TFunction): string | null {
   if (workspaceToolKind(toolName) !== "read") return null;
   const args = parseArgs(input);
+  if (toolName === "read_files") {
+    const count = Array.isArray(args.files) ? args.files.length : 0;
+    return count > 0 ? t("workspace_tool.read_files_title", { count }) : t("workspace_tool.read_files");
+  }
   const path = str(args, "path") ?? "";
   const range = readRangeBadge(args, t);
   const base = path ? t("workspace_tool.read_title", { path }) : t("workspace_tool.read");
@@ -399,7 +403,10 @@ export function WorkspaceActionCard({
 
   return (
     <>
-      <div className="relative my-2 overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm">
+      <div
+        className="relative my-2 overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm"
+        data-tool-call-id={tool.toolCallId}
+      >
         {/* 运行中:左侧细进度条脉动(方案 §4.3);完成后收敛为头部图标状态 */}
         {running ? <span className="absolute inset-y-0 left-0 w-0.5 animate-pulse bg-primary" aria-hidden /> : null}
         <button
@@ -493,6 +500,7 @@ export function WorkspaceActionStep({
         isFirst={isFirst}
         isLast={isLast}
         active={running}
+        dataToolCallId={tool.toolCallId}
         icon={
           running ? (
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -602,6 +610,7 @@ export function WorkspaceApprovalCard({
       className="my-2 overflow-hidden rounded-xl border border-warning/30 border-l-4 border-l-warning bg-warning/5 shadow-sm"
       role="region"
       aria-live="polite"
+      data-tool-call-id={tool.toolCallId}
     >
       <div className="flex items-start gap-2.5 px-4 pt-3">
         <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-warning/15 text-warning">

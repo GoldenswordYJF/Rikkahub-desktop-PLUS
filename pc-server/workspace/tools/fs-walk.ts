@@ -117,6 +117,9 @@ export interface WalkOptions {
 export interface WalkResult {
   stoppedEarly: boolean;
   visitCapReached: boolean;
+  /** S5:读不了的目录数(权限/竞态)。范围之内但没遍历成 → 覆盖缺口;符号链接与
+   *  .gitignore/产物目录跳过是范围外排除,不计数。 */
+  unreadableDirs: number;
 }
 
 /** 同步深度优先遍历(工作区本地盘,同步足够;签名/上限双闸)。条目按字典序回调,输出稳定。 */
@@ -125,6 +128,7 @@ export function walkDirectory(root: string, options: WalkOptions): WalkResult {
   let visited = 0;
   let stoppedEarly = false;
   let visitCapReached = false;
+  let unreadableDirs = 0;
 
   const visit = (dir: string, prefix: string, inheritedRules: IgnoreRule[]): boolean => {
     if (options.signal?.aborted) throw new Error("Operation aborted");
@@ -141,6 +145,7 @@ export function walkDirectory(root: string, options: WalkOptions): WalkResult {
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
+      unreadableDirs++;
       return true; // 不可读目录跳过,不让单点故障终止全局遍历
     }
     entries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
@@ -173,5 +178,5 @@ export function walkDirectory(root: string, options: WalkOptions): WalkResult {
   };
 
   visit(root, "", []);
-  return { stoppedEarly, visitCapReached };
+  return { stoppedEarly, visitCapReached, unreadableDirs };
 }

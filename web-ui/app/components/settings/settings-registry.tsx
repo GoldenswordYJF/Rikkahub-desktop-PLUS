@@ -29,7 +29,9 @@ import { AsrSection, TtsSection } from "~/components/settings/speech";
 import { StatsSection, type StatsPayload } from "~/components/settings/stats";
 import { MemorySection } from "~/components/memory/memory-section";
 import { MemoryExperimentSection } from "~/components/settings/experiments/memory";
+import { CompanionExperimentSection } from "~/components/settings/experiments/companion";
 import { MoodExperimentSection } from "~/components/settings/experiments/mood";
+import { AgentBotSection } from "~/components/settings/experiments/agent-bot";
 import api from "~/services/api";
 import type { Settings } from "~/types";
 
@@ -109,6 +111,8 @@ export const SETTINGS_PAGES: Record<SettingsPageKey, React.ComponentType<Setting
   memory: MemorySection,
   "experiments/memory": MemoryExperimentSection,
   "experiments/mood": MoodExperimentSection,
+  "experiments/agent-bot": AgentBotSection,
+  "experiments/companion": CompanionExperimentSection,
   data: BackupSection,
   "stats/usage": StatsSectionHost,
   "stats/logs": LogsSectionHost,

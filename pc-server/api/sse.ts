@@ -17,6 +17,8 @@ import { toMessageNodeDtos } from "../conversations";
 import { memoryStore } from "../memory/index";
 import { initMemoryVectorBroadcast } from "../memory/vector-index";
 import { generating } from "../conversations/generation-state";
+import { initAgentRunBroadcast } from "../agent-loop/run-tracker";
+import type { AgentRunPushDto } from "../agent-loop/types";
 
 // Streaming clients receive a node_update per chunk. Since each update carries the full growing
 // MessageNode (cumulative text), naive per-chunk broadcasts turn into O(N^2) bytes over SSE and
@@ -122,6 +124,11 @@ export function initSseWiring(): void {
   // waiting_device_code/exchanging/success/error/cancelled 全经此通道推给前端。
   initProviderAuthBroadcast((event) => {
     broadcastTo(appClients, sseFrame("provider_auth", event));
+  });
+  // 自主循环(S1):运行记录变化推给当前会话的详情流(事件名 agent-run)。低频(每轮/每
+  // 工具/每次审批一条),无需合帧;未开详情流时无人接收,前端进入会话后 GET 拉快照。
+  initAgentRunBroadcast((conversationId, push) => {
+    broadcastAgentRun(conversationId, push);
   });
 }
 const encoder = new TextEncoder();
@@ -241,6 +248,12 @@ export function broadcastConversation(conversation: Conversation, event = "snaps
 export function broadcastEngineStatus(conversationId: string, status: EngineStatus) {
   const payload: EngineStatusEventDto = status; // 编译期契约:EngineStatus ≡ 线上 DTO
   broadcastTo(conversationClients.get(conversationId), sseFrame("engine-status", payload));
+}
+
+/** 自主循环(S1):运行记录帧。event=null 时为全量状态(SSE 首帧/兜底),否则为单条
+ *  流水增量 + 更新后的 run 摘要(前端就地合并,不重拉)。 */
+export function broadcastAgentRun(conversationId: string, push: AgentRunPushDto) {
+  broadcastTo(conversationClients.get(conversationId), sseFrame("agent-run", push));
 }
 
 // ===== H-b(专题2):流式增量帧 =====

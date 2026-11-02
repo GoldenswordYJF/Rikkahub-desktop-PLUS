@@ -27,8 +27,10 @@
 import type { ToolDefinition } from "../../pi/packages/coding-agent/src/core/extensions/types.ts";
 import type { Assistant, Conversation, JsonValue, Model, ToolOutputEntry } from "../foundation/types";
 import type { GenerationEventSink, GenerationTarget } from "../inference-engine/events";
-import { openAiLocalTools, openAiMcpTools, openAiSearchTools } from "../tools/bound";
+import { openAiLocalTools, openAiMcpTools, openAiPlanTool, openAiSearchTools } from "../tools/bound";
 import { executeToolCall, realizeToolResult, toolResultToParts } from "../tools/execution";
+import { findPlanContext } from "../tools/plan-context";
+import { PLAN_TOOL_NAME } from "../tools/plan";
 import { openAiToolOutput } from "../tools/format";
 import { initialApprovalState } from "../tools/approval";
 import { gateToolApproval } from "../inference-engine/approval-flow";
@@ -104,6 +106,10 @@ function buildGeneralTool(
           conversationTitle: ctx.conversation.title,
           messageNodeId: ctx.target?.node.id,
           signal,
+          // 自主循环(S2):只有 update_plan 需要改写保护的前值。
+          ...(name === PLAN_TOOL_NAME
+            ? { planContext: findPlanContext(ctx.conversation, toolCallId) }
+            : {}),
         },
       );
       const entries = await realizeToolResult(await toolResultToParts(raw));
@@ -155,6 +161,9 @@ export function createPiGeneralTools(ctx: PiGeneralToolsContext): ToolDefinition
       (tool) => tool.function.name === "save_memory" || tool.function.name === ASK_USER_TOOL_NAME,
     ),
     ...openAiMcpTools(ctx.assistant),
+    // 计划工具走 bound 的同一门控(displaySetting.planPanel),不另立白名单:
+    // 它是 PC 专属显示项,关掉时这里天然为空,与 subagent 的挂载方式同构。
+    ...openAiPlanTool(),
   ];
   return declarations.map((decl) => {
     const shaped = {

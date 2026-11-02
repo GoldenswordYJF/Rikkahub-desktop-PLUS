@@ -6,16 +6,22 @@
 // 循环层负责把上调同步回已建的卡（见 workspace/approval.ts 头注）。
 
 import { getStringArray, isRecord } from "../foundation/utils";
-import type { Assistant, Conversation, JsonValue, ToolApprovalState } from "../foundation/types";
+import type { Assistant, Conversation, JsonValue, ToolApprovalReasonCode, ToolApprovalState } from "../foundation/types";
+import type { ToolBoundaryObserver } from "../foundation/tool-boundary";
+import { observeToolBoundarySafely } from "../foundation/tool-boundary";
 import { skillsDir } from "../foundation/paths";
 import { state } from "../persistence/json-store";
 import {
+  findDangerousCommandRule,
   isWorkspaceToolName,
   lexicalWorkspaceCwd,
   workspaceCallApprovalReason,
+  workspaceCallTargetScope,
+  workspaceToolAccess,
   workspaceToolNeedsApproval,
   type WorkspaceToolName,
 } from "../workspace/approval";
+import { buildWorkspaceBoundarySnapshot } from "../workspace/boundary-snapshot";
 import { getWorkspace } from "../workspace";
 import { sandboxBoundaryActive } from "../workspace/sandbox";
 
@@ -30,12 +36,22 @@ function parseArgsRecord(args: string): Record<string, JsonValue> {
   }
 }
 
+interface WorkspaceApprovalDecision {
+  pending: boolean;
+  /** 审批卡展示的完整缘由(可含目标路径)——现有字段,行为不变。 */
+  reason?: string;
+  /** O4:run 流水白名单字段,短缘由去路径化。 */
+  reasonCode?: ToolApprovalReasonCode;
+  reasonSummary?: string;
+  ruleId?: string;
+}
+
 /** 工作区工具审批判定。args 缺省 = 参数未到（流式建卡），给无参数下界。 */
 function workspaceApprovalDecision(
   toolName: WorkspaceToolName,
   conversation: ConversationWorkspacePick | null | undefined,
   args?: string,
-): { pending: boolean; reason?: string } {
+): WorkspaceApprovalDecision {
   // 工作区工具只在 workspaceId 非空的会话挂载；非工作区会话的残留调用在执行层被拒
   // （workspace/runtime.ts 守卫），这里不挂审批。
   const workspaceId = conversation?.workspaceId;
@@ -44,7 +60,10 @@ function workspaceApprovalDecision(
   // 工作区记录丢失 → 按最严档处理（执行层同样会拒，pending 卡只是多一道门）。
   const preset = workspace?.permissionPreset ?? "confirm_each";
   if (args === undefined || !workspace) {
-    return { pending: workspaceToolNeedsApproval(toolName, preset) };
+    const pending = workspaceToolNeedsApproval(toolName, preset);
+    return pending
+      ? { pending: true, reasonCode: "preset_confirm_each" }
+      : { pending: false };
   }
   const reason = workspaceCallApprovalReason(toolName, preset, parseArgsRecord(args), {
     root: workspace.root,
@@ -55,7 +74,90 @@ function workspaceApprovalDecision(
     sandboxBoundaryActive: sandboxBoundaryActive(),
   });
   if (reason === null) return { pending: false };
-  return { pending: true, ...(reason ? { reason } : {}) };
+  // confirm_each:档位本身要求逐项确认,没有额外缘由。
+  if (preset === "confirm_each") {
+    return { pending: true, reasonCode: "preset_confirm_each", ...(reason ? { reason } : {}) };
+  }
+  const parsed = parseArgsRecord(args);
+  if (toolName === "bash") {
+    const rule = findDangerousCommandRule(String(parsed.command ?? ""));
+    if (rule) {
+      return {
+        pending: true,
+        reasonCode: "destructive_command",
+        reasonSummary: rule.reason,
+        ruleId: rule.id,
+        ...(reason ? { reason } : {}),
+      };
+    }
+  }
+  // balanced 档走到这里的非 bash 分支只有区外写入(免审批前缀已在终局判定里排除)。
+  return {
+    pending: true,
+    reasonCode: "outside_workspace_write",
+    reasonSummary: sandboxBoundaryActive()
+      ? "Writes outside the workspace are blocked by the system sandbox boundary."
+      : "Writes outside the workspace require approval.",
+    ...(reason ? { reason } : {}),
+  };
+}
+
+/** O4:审批最终判定处的可选观测。toolCallId 缺失(纯编码回放)时不观测。 */
+export interface ToolApprovalObservation {
+  toolCallId?: string;
+  observer?: ToolBoundaryObserver;
+}
+
+function observeWorkspaceApproval(
+  toolName: WorkspaceToolName,
+  conversation: ConversationWorkspacePick | null | undefined,
+  args: string | undefined,
+  decision: WorkspaceApprovalDecision,
+  observation: ToolApprovalObservation | undefined,
+): void {
+  if (!decision.pending || !observation?.toolCallId || !observation.observer) return;
+  const workspaceId = conversation?.workspaceId;
+  if (!workspaceId) return;
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) return;
+  const cwd = lexicalWorkspaceCwd(workspace.root, conversation?.workspaceCwd);
+  const snapshot = buildWorkspaceBoundarySnapshot(
+    workspace,
+    cwd,
+    // 审批时点的有效写边界:用户批准后的宽界是执行时语境,由 execution 快照单独记录;
+    // full_access 也只是应用权限档——系统沙箱生效时写边界仍是严界。
+    workspace.permissionPreset === "full_access" && !sandboxBoundaryActive() ? "wide" : "strict",
+  );
+  observeToolBoundarySafely(observation.observer, {
+    toolCallId: observation.toolCallId,
+    toolName,
+    stage: "approval",
+    access: workspaceToolAccess(toolName),
+    targetScope: workspaceCallTargetScope(toolName, parseArgsRecord(args ?? "{}"), {
+      root: workspace.root,
+      cwd,
+    }),
+    snapshot,
+    ...(decision.reasonCode
+      ? {
+          approval: {
+            reasonCode: decision.reasonCode,
+            ...(decision.reasonSummary ? { reasonSummary: decision.reasonSummary } : {}),
+            ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+          },
+        }
+      : {}),
+  });
+}
+
+function pendingApprovalState(decision: WorkspaceApprovalDecision): ToolApprovalState {
+  return {
+    type: "pending",
+    ...(decision.reason ? { reason: decision.reason } : {}),
+    ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}),
+    ...(decision.reasonSummary ? { reasonSummary: decision.reasonSummary } : {}),
+    ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+  };
 }
 
 export function getMcpToolOverride(
@@ -136,11 +238,18 @@ export function initialApprovalState(
   assistant: Assistant,
   conversation?: ConversationWorkspacePick | null,
   args?: string,
+  observation?: ToolApprovalObservation,
 ): ToolApprovalState {
   if (isWorkspaceToolName(toolName)) {
     const decision = workspaceApprovalDecision(toolName, conversation, args);
     if (!decision.pending) return { type: "auto" };
-    return decision.reason ? { type: "pending", reason: decision.reason } : { type: "pending" };
+    observeWorkspaceApproval(toolName, conversation, args, decision, observation);
+    return pendingApprovalState(decision);
   }
-  return toolNeedsApproval(toolName, assistant, conversation) ? { type: "pending" } : { type: "auto" };
+  if (toolNeedsApproval(toolName, assistant, conversation)) {
+    return toolName.startsWith("mcp__")
+      ? { type: "pending", reasonCode: "mcp_tool_requires_approval" }
+      : { type: "pending" };
+  }
+  return { type: "auto" };
 }

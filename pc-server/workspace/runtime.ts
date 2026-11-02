@@ -39,8 +39,16 @@ import {
   createWideWriteOperations,
   WorkspaceBoundaryError,
 } from "./boundary";
-import { findDangerousCommandReason, isWorkspaceToolName, type WorkspaceToolName } from "./approval";
+import {
+  findDangerousCommandReason,
+  isWorkspaceToolName,
+  workspaceCallTargetScope,
+  workspaceToolAccess,
+  type WorkspaceToolName,
+} from "./approval";
 import { sandboxBoundaryActive } from "./sandbox";
+import { buildWorkspaceBoundarySnapshot } from "./boundary-snapshot";
+import { observeToolBoundarySafely, type ToolBoundaryObserver } from "../foundation/tool-boundary";
 import { resolveSshBinding } from "../ssh/workspace-binding";
 import type { SshWorkspaceTarget } from "../ssh/workspace-binding";
 import { buildRemoteWorkspaceTool, REMOTE_WORKSPACE_TOOL_NAMES } from "../ssh/workspace-tools";
@@ -55,6 +63,24 @@ import { createFindTool } from "./tools/find";
 import { createLsTool } from "./tools/ls";
 import { getShellConfig, resetShellConfigCache } from "./tools/shell";
 import type { WorkspaceToolDefinition, WorkspaceToolOutput } from "./tools/types";
+import {
+  decorateReadOutput,
+  readContractEnabled,
+  READ_CONTRACT_DESCRIPTION_APPEND,
+  READ_DEDUP_DESCRIPTION_APPEND,
+} from "./ops/read-contract";
+import { readDedupEnabled, type ReadEvidenceHandle } from "./ops/read-dedup";
+import { createReadFilesTool } from "./ops/read-files";
+import { resumableOutputEnabled } from "./ops/resume-truncation";
+import { searchCoverageEnabled } from "./ops/search-coverage";
+import {
+  annotateEditResult,
+  createEditContractOperations,
+  editParametersWithContract,
+  readEditContractArgs,
+  type EditContract,
+  type EditWriteInfo,
+} from "./ops/edit-contract";
 
 // ----- shell 可用性探针(进程级缓存;Windows 无 Git Bash → bash 工具不挂载,§5.1) -----
 
@@ -170,6 +196,7 @@ export function workspaceRuntimeForConversation(
 // ----- 工具实例构建(pi 内核 + 有界 Operations) -----
 
 /** pi 默认工具顺序(system-prompt.ts:["read","bash","edit","write"]);声明与提示词共用。
+ *  S7 起 read 之后固定挂 read_files(批量读取,常驻面)。
  *  bash 不可用时挂纯 TS 的 grep/find/ls 兜底(2026-08-01 用户拍板:bash 正常时不挂,
  *  防止稀释工具面;pi 的 grep/find/ls 也非默认挂载,此处与 pi 精神一致)。
  *  远程工作区(传 workspace)是另一套能力面,对齐安卓端 WorkspaceCapabilities(SSH)=
@@ -179,8 +206,8 @@ export function workspaceRuntimeForConversation(
 export function mountedWorkspaceToolNames(workspace?: Workspace | null): WorkspaceToolName[] {
   if (workspace?.type === "ssh") return [...REMOTE_WORKSPACE_TOOL_NAMES];
   return shellAvailability().available
-    ? ["read", "bash", "edit", "write"]
-    : ["read", "edit", "write", "grep", "find", "ls"];
+    ? ["read", "read_files", "bash", "edit", "write"]
+    : ["read", "read_files", "edit", "write", "grep", "find", "ls"];
 }
 
 /** 边界宽窄选择(权限档位改版,与 workspace/approval.ts 三档语义配套):
@@ -195,25 +222,41 @@ function buildWorkspaceTool(
   name: WorkspaceToolName,
   runtime: WorkspaceRuntime,
   wideWrite = false,
+  editContract?: EditContract,
 ): WorkspaceToolDefinition<unknown, unknown> {
   // 远程分支:内核在 ssh/workspace-tools.ts(同一契约、换一套手),超长输出仍然落本地
   // tmp/——落盘的是给模型续读用的文本,与命令在哪台机器上跑无关。
   const tmpDir = workspaceTmpDir(runtime.workspace.id);
   if ((runtime.remote || name === "bash") && !existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-  if (runtime.remote) return buildRemoteWorkspaceTool(name, runtime.remote, runtime.cwd, { tempFileDir: tmpDir });
+  if (runtime.remote) {
+    return buildRemoteWorkspaceTool(name, runtime.remote, runtime.cwd, {
+      tempFileDir: tmpDir,
+      // S6:远程 bash 超长输出同样落本地 tmp/,提示可续读(默认关 → pi 原文案)。
+      resumableOutput: resumableOutputEnabled(),
+    });
+  }
   switch (name) {
     case "read":
       return createReadTool(runtime.cwd, {
         operations: createWideReadOperations(),
       }) as WorkspaceToolDefinition<unknown, unknown>;
+    case "read_files":
+      // S7:批量读取复用 read 内核(逐项同一套截断/图片/错误文案)与 S2 装饰。
+      return createReadFilesTool(runtime.cwd, {
+        readContract: readContractEnabled(),
+      }) as WorkspaceToolDefinition<unknown, unknown>;
     case "write":
       return createWriteTool(runtime.cwd, {
         operations: wideWrite ? createWideWriteOperations(runtime.root) : createBoundedWriteOperations(runtime.root),
       }) as WorkspaceToolDefinition<unknown, unknown>;
-    case "edit":
+    case "edit": {
+      const baseOps = wideWrite ? createWideEditOperations(runtime.root) : createBoundedEditOperations(runtime.root);
       return createEditTool(runtime.cwd, {
-        operations: wideWrite ? createWideEditOperations(runtime.root) : createBoundedEditOperations(runtime.root),
+        // S3:expectedRevision / dryRun 经 Operations 注入,复核与写入同在内核的
+        // 文件串行队列内;契约缺省(null)时与移植原版逐字一致。
+        operations: editContract ? createEditContractOperations(baseOps, editContract) : baseOps,
       }) as WorkspaceToolDefinition<unknown, unknown>;
+    }
     case "bash": {
       // tmp/ 放超长输出落盘;上方已按类型统一建好(声明装配也走本函数,每轮热路径)。
       // 透传用户自定义 shellPath(空串→undefined=自动探测);与 shellAvailability 同源。
@@ -222,17 +265,36 @@ function buildWorkspaceTool(
       return createBashTool(runtime.cwd, {
         tempFileDir: tmpDir,
         shellPath,
+        // S6:落盘提示带总量与 read/grep 续读指引(默认关 → pi 原文案)。
+        resumableOutput: resumableOutputEnabled(),
         // 问题4(2.0.0 内测):bash 命令或其派生原生进程(如 bun 的 node:fs 相对路径写)
         // 可能在 cwd 落下 Windows 保留设备名残留文件,执行后清扫出生点。
         operations: withReservedNameSweep(createLocalBashOperations({ shellPath })),
       }) as WorkspaceToolDefinition<unknown, unknown>;
     }
     case "grep":
-      return createGrepTool(runtime.cwd, { operations: createBoundedGrepOperations(runtime.root) }) as WorkspaceToolDefinition<unknown, unknown>;
+      return createGrepTool(runtime.cwd, {
+        operations: createBoundedGrepOperations(runtime.root),
+        // S5:覆盖可见化(默认关 → 内核只采集计数与否,输出逐字保持历史形态)。
+        coverageHonesty: searchCoverageEnabled(),
+        // S6:命中上限时完整结果落盘(默认关 → 历史行为)。
+        resumeTruncatedOutput: resumableOutputEnabled(),
+        tempFileDir: tmpDir,
+      }) as WorkspaceToolDefinition<unknown, unknown>;
     case "find":
-      return createFindTool(runtime.cwd, { operations: createBoundedFindOperations(runtime.root) }) as WorkspaceToolDefinition<unknown, unknown>;
+      return createFindTool(runtime.cwd, {
+        operations: createBoundedFindOperations(runtime.root),
+        coverageHonesty: searchCoverageEnabled(),
+        resumeTruncatedOutput: resumableOutputEnabled(),
+        tempFileDir: tmpDir,
+      }) as WorkspaceToolDefinition<unknown, unknown>;
     case "ls":
-      return createLsTool(runtime.cwd, { operations: createBoundedLsOperations(runtime.root) }) as WorkspaceToolDefinition<unknown, unknown>;
+      return createLsTool(runtime.cwd, {
+        operations: createBoundedLsOperations(runtime.root),
+        coverageHonesty: searchCoverageEnabled(),
+        resumeTruncatedOutput: resumableOutputEnabled(),
+        tempFileDir: tmpDir,
+      }) as WorkspaceToolDefinition<unknown, unknown>;
   }
 }
 
@@ -243,14 +305,21 @@ export function openAiWorkspaceTools(
 ): Array<Record<string, JsonValue>> {
   const runtime = workspaceRuntimeForConversation(conversation);
   if (!runtime) return [];
+  const readExtras = readContractEnabled()
+    ? `${READ_CONTRACT_DESCRIPTION_APPEND}${readDedupEnabled() ? READ_DEDUP_DESCRIPTION_APPEND : ""}`
+    : "";
   return mountedWorkspaceToolNames(runtime.workspace).map((name) => {
     const tool = buildWorkspaceTool(name, runtime);
     return {
       type: "function",
       function: {
         name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters as JsonValue,
+        // S2/S4 契约开启时把行号/revision/续读/去重说明并进声明(两条生成通路同源继承)。
+        description: tool.name === "read" || tool.name === "read_files" ? (readExtras ? `${tool.description}${readExtras}` : tool.description) : tool.description,
+        // S3:契约开启时 edit 声明多出 expectedRevision / dryRun 两个可选参数。
+        parameters: tool.name === "edit" && readContractEnabled()
+          ? (editParametersWithContract(tool.parameters as Record<string, unknown>) as JsonValue)
+          : tool.parameters as JsonValue,
       },
     } as Record<string, JsonValue>;
   });
@@ -367,6 +436,12 @@ export interface WorkspaceToolCoreContext {
   signal?: AbortSignal;
   /** 执行中部分输出(pi onUpdate 全量快照语义,bash 内核 100ms 自节流;其余工具忽略)。 */
   onUpdate?: (partial: WorkspaceToolOutput<unknown>) => void;
+  /** S4:原文证据句柄(pi 通路由 runner 在 session 建立后挂探针;聊天/子智能体缺省
+   *  = 证据不足,重复读取一律回全文)。 */
+  readEvidence?: ReadEvidenceHandle;
+  /** O4:执行时点边界观测(可选;observer 由编排层适配到 run tracker)。 */
+  observer?: ToolBoundaryObserver;
+  toolCallId?: string;
 }
 
 /** 工作区工具守卫+执行内核(唯一实现,聊天引擎与 pi 引擎共用)。
@@ -418,15 +493,44 @@ export async function executeWorkspaceToolCore(
 
   const started = Date.now();
   touchWorkspaceAccess(runtime.workspace.id);
+  // 有效写边界在执行时点定一次(审批时快照不冒充执行时:用户批准会让有效写范围变宽)。
+  const boundaryActive = sandboxBoundaryActive();
+  const wideWrite =
+    !boundaryActive &&
+    (context?.userApproved === true || runtime.workspace.permissionPreset === "full_access");
+  // O4:执行观测放在全部守卫之后、真正执行之前——记录的是这次调用实际生效的边界
+  // (stage=execution 与审批时点分开,绝不回填)。
+  if (context?.observer && context.toolCallId) {
+    observeToolBoundarySafely(context.observer, {
+      toolCallId: context.toolCallId,
+      toolName: name,
+      stage: "execution",
+      access: workspaceToolAccess(name),
+      targetScope: workspaceCallTargetScope(name, args, { root: runtime.root, cwd: runtime.cwd }),
+      snapshot: buildWorkspaceBoundarySnapshot(
+        runtime.workspace,
+        runtime.cwd,
+        wideWrite ? "wide" : "strict",
+      ),
+    });
+  }
   try {
+    // S3:契约开启时才解析 expectedRevision/dryRun;关闭时忽略这两个参数,与旧行为一致。
+    let editWriteInfo: EditWriteInfo | undefined;
+    let editContract: EditContract | undefined;
+    if (name === "edit" && readContractEnabled()) {
+      const parsed = readEditContractArgs(args);
+      if (!parsed.ok) throw new Error(parsed.error);
+      editContract = { ...parsed.contract, onWrite: (info) => { editWriteInfo = info; } };
+    }
     const tool = buildWorkspaceTool(
       name,
       runtime,
       // 区外写入是否放行到宽界路径。实测边界生效时(Windows 低完整性内核 / 容器只读根 fs)
       // 操作系统会直接拒绝区外写入,此时再走宽界只是让 UI 弹一句"允许一次"然后被系统打回——
       // 给做不到的承诺比不给更糟,所以边界生效 ⇒ 一律严界。
-      !sandboxBoundaryActive() &&
-        (context?.userApproved === true || runtime.workspace.permissionPreset === "full_access"),
+      wideWrite,
+      editContract,
     );
     let input: unknown;
     switch (name) {
@@ -436,6 +540,10 @@ export async function executeWorkspaceToolCore(
           offset: optionalNumberArg(args, "offset"),
           limit: optionalNumberArg(args, "limit"),
         };
+        break;
+      case "read_files":
+        // 形状(1-32、逐项 path/offset/limit)由批量读内核自校验并逐项报错,这里原样透传。
+        input = { files: args.files };
         break;
       case "write":
         input = { path: requireStringArg(args, "path", name), content: String(args.content ?? "") };
@@ -448,7 +556,42 @@ export async function executeWorkspaceToolCore(
         input = { command: String(args.command), timeout: clampBashTimeoutSeconds(optionalNumberArg(args, "timeout")) } satisfies BashToolInput;
         break;
     }
-    const result = await tool.execute(input, context?.signal, context?.onUpdate);
+    const executed = await tool.execute(input, context?.signal, context?.onUpdate);
+    // S2:read 输出契约(行号 + revision + 续读位)。装饰层只在开关开启、本地文本读取、
+    // 内核成功返回单文本块时改写;details.truncation 原值保留(前端渲染契约不变)。
+    // S4:同一会话内重复读取走指纹短路(证据缺省/压缩后/文件变化一律回全文)。
+    // S3:edit 回执追加新 revision(dryRun 明确标注未写盘)。三者互斥,统一在这里收口。
+    let result = executed;
+    if (name === "read" && readContractEnabled()) {
+      result = await decorateReadOutput(
+        {
+          pathArg: String(args.path ?? ""),
+          offset: optionalNumberArg(args, "offset"),
+          limit: optionalNumberArg(args, "limit"),
+          cwd: runtime.cwd,
+          remote: runtime.remote !== null,
+          ...(context?.conversationId
+            ? {
+                dedup: {
+                  conversationId: context.conversationId,
+                  // 工作区身份/根/cwd/权限档任一变化 ⇒ 旧指纹失效(签名进键)。
+                  workspaceSignature: [
+                    runtime.workspace.id,
+                    runtime.workspace.type,
+                    runtime.workspace.permissionPreset,
+                    runtime.root,
+                    runtime.cwd,
+                  ].join("\u0000"),
+                  ...(context.readEvidence?.probe ? { probe: context.readEvidence.probe } : {}),
+                },
+              }
+            : {}),
+        },
+        executed,
+      );
+    } else if (name === "edit" && editWriteInfo) {
+      result = annotateEditResult(executed, editWriteInfo);
+    }
     const summary = result.content
       .map((entry) => (entry.type === "text" ? entry.text : ""))
       .join("\n");
@@ -461,7 +604,7 @@ export async function executeWorkspaceToolCore(
     });
     // 系统沙盒边界已生效时，区外写入是被操作系统（Windows 低完整性内核 / 容器只读挂载）
     // 挡下来的，不只是应用层的判断。给模型补一句"换区内路径"，免得它反复换写法重试。
-    if (err instanceof WorkspaceBoundaryError && sandboxBoundaryActive()) {
+    if (err instanceof WorkspaceBoundaryError && boundaryActive) {
       err.message +=
         " The system sandbox boundary is active (writes outside the workspace are rejected by the operating system), so retrying with another spelling of the same path will not help — write inside the workspace instead.";
     }
@@ -480,6 +623,9 @@ export async function runWorkspaceTool(
     userApproved?: boolean;
     signal?: AbortSignal;
     onToolPartialOutput?: (output: ToolOutputEntry[]) => void;
+    /** O4:执行时点边界观测透传(聊天引擎由 ToolContext 提供)。 */
+    observer?: ToolBoundaryObserver;
+    toolCallId?: string;
   },
 ): Promise<{ output: ToolOutputEntry[]; fileCreations?: Array<{ data: string; mime: string; prefix: string }> }> {
   const onPartial = context?.onToolPartialOutput;
@@ -487,6 +633,8 @@ export async function runWorkspaceTool(
     conversationId: context?.conversationId,
     userApproved: context?.userApproved,
     signal: context?.signal,
+    ...(context?.observer ? { observer: context.observer } : {}),
+    ...(context?.toolCallId ? { toolCallId: context.toolCallId } : {}),
     // bash 执行中部分输出回写(全量快照);其余工具的内核忽略 onUpdate
     onUpdate: onPartial ? (partial) => onPartial(toToolResult(name as WorkspaceToolName, partial).output) : undefined,
   });

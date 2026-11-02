@@ -658,3 +658,53 @@ describe("窗口化翻页与全量确保(专题2 I-2)", () => {
     expect(await ensureFullConversationDetail("a")).toBeNull();
   });
 });
+
+describe("agent-run 帧分流(自主循环 S1)", () => {
+  const runSummary = (overrides: Record<string, unknown> = {}) => ({
+    id: "run-1",
+    conversationId: "a",
+    nodeId: null,
+    engine: "chat",
+    status: "running",
+    phase: "acting",
+    stopReason: null,
+    rounds: 0,
+    attempts: 0,
+    replanCount: 0,
+    stallReason: null,
+    goal: null,
+    startedAt: 1,
+    endedAt: null,
+    error: null,
+    ...overrides,
+  });
+
+  test("首帧全量落地,增量按 seq 追加;engine-status 分流互不干扰", () => {
+    const release = acquireConversationStream("a");
+    streams[0]!.emit("agent-run", {
+      type: "agent_run",
+      run: runSummary(),
+      event: null,
+      events: [{ seq: 1, at: 1, kind: "run_started", summary: "开始", payload: null }],
+    } as unknown as ConversationStreamEvent);
+    const runs = () => useConversationStore.getState().agentRuns;
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1]);
+
+    streams[0]!.emit("agent-run", {
+      type: "agent_run",
+      run: runSummary({ rounds: 1 }),
+      event: { seq: 2, at: 2, kind: "round", summary: "第 1 轮", payload: { round: 1 } },
+    } as unknown as ConversationStreamEvent);
+    expect(runs()["a"]!.run.rounds).toBe(1);
+    expect(runs()["a"]!.events.map((item) => item.seq)).toEqual([1, 2]);
+
+    // 未知/畸形载荷不落地
+    streams[0]!.emit("agent-run", { nope: true } as unknown as ConversationStreamEvent);
+    expect(runs()["a"]!.events).toHaveLength(2);
+
+    streams[0]!.emit("engine-status", { busy: true, phase: "compacting", startedAt: 5 } as unknown as ConversationStreamEvent);
+    expect(useConversationStore.getState().engineStatus["a"]?.phase).toBe("compacting");
+    expect(runs()["a"]).toBeDefined();
+    release();
+  });
+});

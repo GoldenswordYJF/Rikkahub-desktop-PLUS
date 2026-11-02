@@ -6,11 +6,14 @@ import { existsSync } from "node:fs";
 import type { Assistant, JsonValue, Provider, ProxyConfig, SearchService } from "../../foundation/types";
 import type { Settings } from "../../foundation/types/settings";
 import { validateSubagentPatch } from "../../foundation/types/settings/subagent-config";
+import { validateAgentLoopPatch } from "../../foundation/types/settings/agent-loop-config";
+import type { WorkspaceToolsConfig } from "../../foundation/types/settings/workspace-tools-config";
 import { getStringArray, id, isRecord } from "../../foundation/utils";
 import { RUNNING_IN_CONTAINER } from "../../foundation/platform";
 import { searchSelectionAfterDelete } from "../../foundation/search-selection";
 import { handleSetWebPassword, handleWebAuthStatus, stripAuthSecrets } from "../auth";
 import { refreshShellAvailability } from "../../workspace/runtime";
+import { normalizeSandboxWritableDirs } from "../../workspace/writable-dirs";
 import { shellStatusPayload } from "./workspaces";
 import {
   applyEffectiveProxy,
@@ -26,6 +29,7 @@ import { firstProviderModel } from "../../model-providers/index";
 import { loadModelsDev, modelsDevCache } from "../../inference-engine/providers";
 import { backfillModelDisplayNames } from "../../model-providers/display-names";
 import { syncMcpServerTools } from "../../tools/mcp";
+import { toolDiscoveryDiagnostics } from "../../tools/discovery-store";
 import { normalizeMcpHeaders } from "../../tools/mcp-headers";
 import { parseMcpImportJson } from "../../tools/mcp-import";
 import { closeStdioClient, isStdioMcpServer, stdioConfigFingerprint } from "../../tools/mcp-stdio";
@@ -380,6 +384,16 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     });
     return json({ status: "ok" });
   }
+  // S11 运维诊断(只读):当前激活集、待激活与失效原因(服务器禁用/删除、助手未挂、
+  // 工具/覆盖关闭)。assistantId 缺省取全局当前助手;conversationId 缺省时激活集为空。
+  // 这里不做清理——清理发生在下一次工具装配(conversationToolsWithDiscovery / pi 装配),
+  // 诊断只如实报告当前持久化状态。
+  if (path === "settings/tool-discovery/diagnostics" && request.method === "GET") {
+    const assistantId = url.searchParams.get("assistantId") || state.settings.assistantId;
+    const assistant = state.settings.assistants.find((item) => item.id === assistantId);
+    if (!assistant) return error("Assistant not found", 404);
+    return json(toolDiscoveryDiagnostics(assistant, url.searchParams.get("conversationId")));
+  }
   if (path === "settings/assistant/injections" && request.method === "POST") {
     const body = await readJson<{
       assistantId: string;
@@ -511,6 +525,23 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       // 查不到就报错）。
       const isBuiltin = transport === BUILTIN_MCP_TRANSPORT;
       const isStdio = transport === "stdio";
+      // 沙盒可写目录(stdio 专属):受限档下低完整性进程只能写数据目录与工作区,
+      // 服务器自己的数据目录(向量库等)必须由用户显式声明。字段缺省时沿用旧值,
+      // 避免旧前端保存一次就把声明清空;路径规范化与危险根目录拦截单源在 writable-dirs.ts。
+      // 标注由下次启动的 Medium 准备进程完成,所以这里只落声明、立即返回 restart 语义由 UI 提示。
+      const rawWritableDirs =
+        body.sandboxWritableDirs === undefined
+          ? prevServer?.sandboxWritableDirs
+          : typeof body.sandboxWritableDirs === "string"
+            ? body.sandboxWritableDirs.split(/\r?\n/)
+            : body.sandboxWritableDirs;
+      const writableDirs = normalizeSandboxWritableDirs(rawWritableDirs);
+      if (isStdio && writableDirs.invalid.length > 0) {
+        return error(
+          `沙盒可写目录必须是绝对路径，且不能是盘符根目录、系统目录或用户家目录：${writableDirs.invalid.join("、")}`,
+          400,
+        );
+      }
       // 切换传输方式时旧进程必须立刻退出：stdio 配置变化由运行时指纹兜底，
       // 但切回 HTTP 后不会再有请求来触发那次比对。
       if (!isStdio) closeStdioClient(serverId);
@@ -526,6 +557,7 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
               args: Array.isArray(body.args) ? body.args.map((item) => String(item ?? "")).filter((arg) => arg.length > 0) : [],
               env: normalizeMcpHeaders(body.env) as unknown as JsonValue[],
               cwd: String(body.cwd ?? "").trim(),
+              sandboxWritableDirs: writableDirs.dirs,
             }
           : {}),
         commonOptions: {
@@ -827,6 +859,29 @@ ${outcome.serverName ? `<p>${esc(outcome.serverName)}</p>` : ""}
     if (!parsed.ok) return error(parsed.error, 400);
     updateSettings({ ...state.settings, subagent: { ...state.settings.subagent, ...parsed.value } });
     return json({ status: "ok", subagent: state.settings.subagent });
+  }
+  // 工作区工具面契约开关(PC-only):布尔字段整单校验,任一类型不符即 400。
+  if (path === "settings/workspace-tools" && request.method === "POST") {
+    const body = await readJson<Record<string, JsonValue>>(request);
+    const patch: Partial<WorkspaceToolsConfig> = {};
+    for (const key of ["readContract", "readDedup", "searchCoverage", "toolDiscovery", "resumableOutput", "mcpDescriptionCap"] as const) {
+      const value = body[key];
+      if (value === undefined) continue;
+      if (typeof value !== "boolean") return error(`${key} must be a boolean`, 400);
+      patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) return error("no recognized workspace tool settings in patch", 400);
+    updateSettings({ ...state.settings, workspaceTools: { ...state.settings.workspaceTools, ...patch } });
+    return json({ status: "ok", workspaceTools: state.settings.workspaceTools });
+  }
+  // 自主循环(PC-only):整单校验,越界即 400(不夹取、不部分生效)。读取侧宽容归一
+  // 在 persistence/state-load.ts。关闭总开关时不建运行记录、判定与重试全部不生效。
+  if (path === "settings/agent-loop" && request.method === "POST") {
+    const body = await readJson<Record<string, JsonValue>>(request);
+    const parsed = validateAgentLoopPatch(body);
+    if (!parsed.ok) return error(parsed.error, 400);
+    updateSettings({ ...state.settings, agentLoop: { ...state.settings.agentLoop, ...parsed.value } });
+    return json({ status: "ok", agentLoop: state.settings.agentLoop });
   }
   if (path === "settings/search/service" && request.method === "POST") {
     const body = await readJson<{ index: number }>(request);
@@ -1384,6 +1439,30 @@ ${outcome.serverName ? `<p>${esc(outcome.serverName)}</p>` : ""}
     // 开关只在启动编排时读取(锁端口之前),改动下次重启生效;当前运行不变,
     // 返回 requiresRestart 让界面提示重启(端口设置同款)。
     return json({ status: "ok", sandboxRestricted, requiresRestart: true });
+  }
+  if (path === "settings/sandbox-extra-dirs" && request.method === "POST") {
+    // 受限沙盒的额外可写目录(全局)。与开关同款:Windows 低完整性专属,容器由挂载表决定。
+    if (RUNNING_IN_CONTAINER) {
+      return error("容器部署的可写范围由挂载表决定(compose 的 :rw 挂载),应用内目录声明不生效。", 400);
+    }
+    if (process.platform !== "win32") {
+      return error("受限沙盒目前仅支持 Windows 部署(低完整性机制)。", 400);
+    }
+    const body = await readJson<{ dirs?: unknown }>(request).catch(
+      () => ({}) as { dirs?: unknown },
+    );
+    const normalized = normalizeSandboxWritableDirs(
+      typeof body?.dirs === "string" ? body.dirs.split(/\r?\n/) : body?.dirs,
+    );
+    if (normalized.invalid.length > 0) {
+      return error(
+        `可写目录必须是绝对路径，且不能是盘符根目录、系统目录或用户家目录：${normalized.invalid.join("、")}`,
+        400,
+      );
+    }
+    updateSettings({ ...state.settings, sandboxExtraWritableDirs: normalized.dirs });
+    // 标注由下次启动的 Medium 准备进程执行(运行中的低完整性进程无权扩权)。
+    return json({ status: "ok", dirs: normalized.dirs, requiresRestart: true });
   }
   if (path === "settings/shell-path" && request.method === "POST") {
     // shellPath 是 Windows 机器级 bash 路径;容器部署是 Linux,无此概念,直接拒写(同 port)。

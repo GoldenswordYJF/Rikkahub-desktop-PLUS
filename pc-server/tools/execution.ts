@@ -22,6 +22,9 @@ import { mcpToolFailureError } from "./mcp-health";
 import { runAskUserTool, runClipboardTool, runGetTimeInfoTool, runTextToSpeechTool } from "./local";
 import { readSkillBody, safeSkillFile } from "./skills";
 import { runSubagentDispatch, type SubagentDispatchInput } from "./subagent";
+import { isToolDiscoveryEnabled, runSearchToolsTool } from "./discovery-store";
+import { TOOL_DISCOVERY_TOOL_NAME } from "./discovery";
+import { PLAN_TOOL_NAME, planToolOutcome, planToolResult } from "./plan";
 import { isWorkspaceToolName } from "../workspace/approval";
 import { runWorkspaceTool } from "../workspace/runtime";
 
@@ -111,8 +114,18 @@ export async function executeToolCall(
     });
   }
   // 工作区工具（pi 移植层）：会话必须绑定工作区，守卫链在 runtime 内（同 search_web
-  // 关闭后拒执的语义：历史残留调用招拒绝文案回灌模型）。
-  if (isWorkspaceToolName(name)) return runWorkspaceTool(name, args, context);
+  // 关闭后拒执的语义：历史残留调用招拒绝文案回灌模型）。O4：执行时点边界观测随
+  // ToolContext 透传，toolCallId 供 run 流水关联审批记录。
+  if (isWorkspaceToolName(name)) {
+    return runWorkspaceTool(name, args, {
+      ...(context?.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(context?.userApproved === true ? { userApproved: true } : {}),
+      ...(context?.signal ? { signal: context.signal } : {}),
+      ...(context?.onToolPartialOutput ? { onToolPartialOutput: context.onToolPartialOutput } : {}),
+      ...(context?.boundaryObserver ? { observer: context.boundaryObserver } : {}),
+      ...(typeof toolCall.id === "string" && toolCall.id ? { toolCallId: toolCall.id } : {}),
+    });
+  }
   // 联网搜索是可关闭的工具(全局 enableWebSearch 开关)。关闭后,tools 数组里不再声明
   // search_web,但历史消息里残留的 search tool_call 仍会诱导模型再次调用——而本函数原本
   // 无条件执行真搜索,造成"关了搜索 AI 照样搜"的 bug。加守卫与 use_skill(6266) /
@@ -139,6 +152,29 @@ export async function executeToolCall(
   if (name === "clipboard_tool") return runClipboardTool(args);
   if (name === "text_to_speech") return runTextToSpeechTool(args);
   if (name === "ask_user") return runAskUserTool(args);
+  // 计划工具:执行 = 归一化后回一份小回执(计划本体活在 part.input 里,面板读它,
+  // 不落库、不建会话级状态)。默认开(「不写即开」,与 bound.ts 门控同向);用户中途关掉时
+  // 按"未启用"拒执,与 search_web 同一语义,防止模型照着历史里的旧调用继续复读。
+  if (name === PLAN_TOOL_NAME) {
+    if (state.settings.displaySetting?.planPanel === false) {
+      throw new Error(
+        "The plan panel is currently disabled. Stop calling update_plan and just describe your steps in text.",
+      );
+    }
+    // 计划 v2(自主循环 S2):只在总开关开启时合并——目标三件套的改写保护、attempts
+    // 向后携带、权威快照都属自主循环行为;关闭时回执与引入前逐字一致。
+    if (state.settings.agentLoop?.enabled === true) {
+      return planToolOutcome(
+        context?.planContext?.previous ?? null,
+        args,
+        { allowGoalChange: context?.planContext?.allowGoalChange === true },
+      );
+    }
+    return planToolResult(args, { legacy: true });
+  }
+  // S9 工具发现行:命中只登记会话级 pending,下一轮组装才携带 schema。开关关闭 /
+  // 无会话时由实现抛错回灌(与 search_web 关闭后拒执同一语义)。
+  if (name === TOOL_DISCOVERY_TOOL_NAME) return runSearchToolsTool(assistant, args, context);
   if (name === "use_skill") {
     const skillName = String(args.name ?? "").trim();
     if (!getStringArray(assistant.enabledSkills).includes(skillName)) {
@@ -154,11 +190,21 @@ export async function executeToolCall(
     return { name: skillName, content };
   }
   if (name.startsWith("mcp__")) {
+    // 解析目标服务器与 callMcpTool 同一谓词(attached + server/tool/覆盖三级 enable)。
+    // S11 失败路径:发现开启时,历史/上一轮激活过的工具名可能已随服务器禁用、删除或
+    // 工具/覆盖关闭而消失。给可自救的明确错误(指向 search_tools 重新发现),而不是
+    // 落进 MCP 诊断或未知工具分支。发现关闭时保持原有 callMcpTool 语义不变(null 交给
+    // callMcpTool 自己抛 "not available for this assistant",再由 mcpToolFailureError 包装)。
+    const target = resolveMcpToolServer(assistant, name, state.settings.mcpServers);
+    if (!target && isToolDiscoveryEnabled(assistant)) {
+      throw new Error(
+        `MCP tool '${name}' is no longer available: its MCP server may be disabled or removed, or the tool was turned off. Call ${TOOL_DISCOVERY_TOOL_NAME} to rediscover available tools; do not call '${name}' again.`,
+      );
+    }
     bumpAnalyticsMcpCount();
     // 专题9 MCP OAuth 2.1 + D13(复查):调用前只补新"目标服务器"的临期令牌——旧实现
     // 串行刷全部服务器,一个坏端点的网络超时会拖慢所有无关工具调用。刷新结果写回
     // state,后续取 state.settings.mcpServers 即最新。
-    const target = resolveMcpToolServer(assistant, name, state.settings.mcpServers);
     if (target) await ensureFreshMcpToken(target.server);
     try {
       return await callMcpTool(assistant, name, args, state.settings.mcpServers, addLog);

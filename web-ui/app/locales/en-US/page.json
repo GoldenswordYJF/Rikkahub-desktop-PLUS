@@ -132,6 +132,119 @@
       "notification_title": "AI is waiting for your approval",
       "notification_body": "\"{{summary}}\" awaits your approval"
     },
+    "agent_run": {
+      "title": "This run",
+      "history_title": "Run history",
+      "latest_option": "Latest run",
+      "history_option": "{{time}} · {{status}} · {{rounds}} rounds",
+      "selector_label": "Select a run to review",
+      "newer_run": "A newer run exists; you are viewing history",
+      "history_readonly": "History is read-only",
+      "back_to_latest": "Back to latest",
+      "loading_history": "Loading historical run…",
+      "history_missing": "This run record is no longer available",
+      "history_failed": "Could not load the historical run",
+      "load_older": "Load earlier",
+      "loading_older": "Loading…",
+      "load_older_failed": "Could not load earlier events",
+      "loaded_events": "{{count}} loaded",
+      "goal_label": "Goal",
+      "terminal_reason": "Ended because: {{reason}}",
+      "locate": "Locate message",
+      "locate_missing": "That tool message is not in the current view",
+      "live": "live",
+      "rounds": "{{count}} rounds",
+      "tools": "{{count}} tools",
+      "retries": "{{count}} retries",
+      "replans": "{{count}} replans",
+      "empty": "No activity yet",
+      "unknown_event": "Unrecognized event ({{kind}})",
+      "boundary_loading": "Loading boundary definition…",
+      "boundary_unavailable": "Boundary definition unavailable",
+      "filter": {
+        "all": "All",
+        "tools": "Tools",
+        "approval": "Approvals",
+        "retry_replan": "Retries & replans",
+        "issues": "Issues"
+      },
+      "phase": {
+        "planning": "Planning",
+        "acting": "Acting",
+        "observing": "Observing",
+        "deciding": "Deciding",
+        "replanning": "Replanning",
+        "verifying": "Verifying",
+        "awaiting_approval": "Awaiting approval",
+        "awaiting_user": "Awaiting user",
+        "retrying": "Retrying"
+      },
+      "actions": {
+        "continue": "Continue",
+        "change_goal": "Change goal",
+        "continue_message": "Continue",
+        "send_failed": "Could not continue the run"
+      },
+      "status": {
+        "running": "Running",
+        "suspended": "Awaiting approval",
+        "succeeded": "Succeeded",
+        "failed": "Failed",
+        "exhausted": "Rounds exhausted",
+        "stalled": "Stalled",
+        "stopped": "Stopped"
+      },
+      "kind": {
+        "run_started": "Run started ({{engine}})",
+        "run_resumed": "Resumed after approval",
+        "round": "Round {{round}}",
+        "tool_call": "Called {{tool}}",
+        "tool_execution": "Executed {{tool}}",
+        "tool_result": "Finished {{tool}}",
+        "approval_pending": "Awaiting approval · {{tool}}",
+        "approval_pending_reason": "Awaiting approval · {{tool}} ({{reason}})",
+        "approval_approved": "Approved · {{tool}}",
+        "approval_denied": "Denied · {{tool}}",
+        "approval_denied_reason": "Denied · {{tool}}: {{reason}}",
+        "boundary": "Permission boundary: {{preset}} · {{scope}} · {{sandbox}}",
+        "retry": "Transport retry {{attempt}}/{{max}}",
+        "retry_no_max": "Transport retry {{attempt}}",
+        "run_finished": "{{status}}",
+        "run_finished_reason": "{{status}} ({{reason}})",
+        "run_suspended": "Paused while awaiting approval"
+      },
+      "boundary": {
+        "preset": {
+          "confirm_each": "Confirm each",
+          "balanced": "Balanced",
+          "full_access": "Full access"
+        },
+        "scope": {
+          "strict": "Writes inside workspace only",
+          "wide": "Writes outside workspace allowed"
+        },
+        "sandbox": {
+          "active": "System sandbox active",
+          "inactive": "No system sandbox"
+        },
+        "access": {
+          "read": "Read",
+          "write": "Write",
+          "execute": "Execute"
+        },
+        "target": {
+          "inside": "Inside workspace",
+          "outside": "Outside workspace",
+          "unknown": "Target unknown"
+        },
+        "reason": {
+          "preset_confirm_each": "Permission preset requires confirmation",
+          "destructive_command": "Destructive command",
+          "outside_workspace_write": "Write outside workspace",
+          "mcp_tool_requires_approval": "MCP tool requires approval"
+        }
+      }
+    },
     "translate": {
       "dialog_title": "Select translation language",
       "dialog_description": "The translation is saved below the current reply and won't enter the next round of context.",

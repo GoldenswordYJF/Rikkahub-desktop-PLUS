@@ -121,6 +121,8 @@ export const SETTINGS_NAV = [
     children: [
       { id: "memory", labelKey: "settings:subnav.experiments.memory" },
       { id: "mood", labelKey: "settings:subnav.experiments.mood" },
+      { id: "agent-bot", labelKey: "settings:subnav.experiments.agent_bot" },
+      { id: "companion", labelKey: "settings:subnav.experiments.companion" },
     ],
   },
   {
@@ -218,6 +220,8 @@ const LEGACY_PAGES: Record<string, SettingsLocation> = {
   "network/proxy": { section: "connectivity", sub: "proxy" },
   "data/server": { section: "connectivity", sub: "server" },
   "data/backup": { section: "data", sub: null },
+  // 2026-11-01:实验区这一页对外改名 AgentBot(自主循环只是其中一部分),旧二级 id 继续可达。
+  "experiments/agent-loop": { section: "experiments", sub: "agent-bot" },
 };
 
 /**

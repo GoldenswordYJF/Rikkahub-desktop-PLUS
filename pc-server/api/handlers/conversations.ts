@@ -44,6 +44,10 @@ import { resolveToolApproval } from "../../inference-engine/approval-gate";
 import { finishToolParts, stripLoadingPlaceholder } from "../../inference-engine/parts";
 import { listConversationFiles } from "../../conversations/conversation-files";
 import { scheduleCompactionCandidates } from "../../memory/experiment/compaction-candidates";
+import { getRunForConversation, getRunSnapshot, listRunEventPage, listRuns } from "../../agent-loop/run-store";
+import { getRunPlanProjection } from "../../agent-loop/plan-projection";
+import type { AgentRunEventPageDto, AgentRunListDto, AgentRunPushDto, RunProjectionDto } from "../../agent-loop/types";
+import { recordApprovalDecision } from "../../agent-loop/run-tracker";
 
 export async function handleConversationRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   // 列表失效事件已并入 /api/events 通道(invalidate 事件);会话详情流保持独立端点
@@ -144,6 +148,20 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       } satisfies EngineStatusEventDto]);
     }
     const initialFrames: [string, JsonValue | object][] = [initialFrame, ...statusFrames];
+    // 自主循环(S1):运行记录快照随详情流首帧下发(仅总开关启用时有 run)。增量走
+    // agent-run 帧(api/sse 的 broadcastAgentRun);这里带全量事件用于切页/重连恢复。
+    const agentRunSnapshot = state.settings.agentLoop?.enabled === true ? getRunSnapshot(conversation.id) : null;
+    if (agentRunSnapshot?.run) {
+      initialFrames.push(["agent-run", {
+        type: "agent_run",
+        run: agentRunSnapshot.run,
+        event: null,
+        events: agentRunSnapshot.events,
+        hasMore: agentRunSnapshot.hasMore,
+        nextBeforeSeq: agentRunSnapshot.nextBeforeSeq,
+        throughSeq: agentRunSnapshot.throughSeq,
+      } satisfies AgentRunPushDto]);
+    }
     return openSse(
       () => initialFrames,
       (controller) => {
@@ -153,6 +171,54 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
         return () => set.delete(controller);
       },
     );
+  }
+
+  // 自主循环(S1):运行记录快照(面板挂载/SSE 未连时拉取)。开关关闭时恒为空,
+  // 前端按设置隐藏入口;保留空快照形状,调用方无需分支。
+  const conversationAgentRun = path.match(/^conversations\/([^/]+)\/agent-run$/);
+  if (conversationAgentRun && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRun[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    return json(getRunSnapshot(conversation.id));
+  }
+
+  // O1:保留的 run 列表(不携带事件,避免响应随事件数膨胀)。
+  const conversationAgentRuns = path.match(/^conversations\/([^/]+)\/agent-runs$/);
+  if (conversationAgentRuns && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRuns[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    return json({ runs: listRuns(conversation.id) } satisfies AgentRunListDto);
+  }
+
+  // O1:按游标读取任意保留 run 的事件(严格 seq < beforeSeq,页内升序)。
+  // 必须先校验 run 属于该会话,不能凭 runId 跨会话读取。
+  const conversationAgentRunEvents = path.match(/^conversations\/([^/]+)\/agent-runs\/([^/]+)\/events$/);
+  if (conversationAgentRunEvents && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRunEvents[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    const run = getRunForConversation(conversation.id, conversationAgentRunEvents[2]);
+    if (!run) return error("Agent run not found", 404);
+    const rawBeforeSeq = url.searchParams.get("beforeSeq");
+    let beforeSeq: number | null = null;
+    if (rawBeforeSeq !== null) {
+      const parsed = Number(rawBeforeSeq);
+      if (!Number.isInteger(parsed) || parsed < 1) return error("Invalid beforeSeq", 400);
+      beforeSeq = parsed;
+    }
+    return json(
+      listRunEventPage(run.id, { beforeSeq, limit: url.searchParams.get("limit") }) satisfies AgentRunEventPageDto,
+    );
+  }
+
+  // O3:run 级只读投影。计划来源直接查该 run 全部事件与整段会话消息,
+  // 不依赖前端已加载的事件页;归属校验与 events 路由一致。
+  const conversationAgentRunProjection = path.match(/^conversations\/([^/]+)\/agent-runs\/([^/]+)\/projection$/);
+  if (conversationAgentRunProjection && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRunProjection[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    const run = getRunForConversation(conversation.id, conversationAgentRunProjection[2]);
+    if (!run) return error("Agent run not found", 404);
+    return json(getRunPlanProjection(conversation, run) satisfies RunProjectionDto);
   }
 
   const conversationRoute = path.match(/^conversations\/([^/]+)(?:\/(.*))?$/);
@@ -841,6 +907,9 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.updateAt = Date.now();
       persistConversation(conversation);
       broadcastConversation(conversation);
+      // 自主循环(S1):把用户决定记进运行流水(在途 run 或最近一条 suspended run)。
+      // 只记账,不改变审批语义——放行/拒绝仍由下方 resolveToolApproval/续跑决定。
+      recordApprovalDecision(conversation.id, String(body.toolCallId ?? ""), body.approved === true, body.reason);
       // P3(方案 §4.4):审批内化后优先送达在途等待者(approval-gate 汇合),生成保持
       // 在跑,execute 原地放行/拒绝——不走"暂停→重触发续跑"。
       // 审批旁路判定收编(原 B-2 登记点):无等待者时"是否重触发"改问注册表的

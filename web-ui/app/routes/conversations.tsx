@@ -88,6 +88,7 @@ import {
   useConversationSubscription,
 } from "~/stores/conversation-stream";
 import { WorkbenchHost } from "~/components/workbench/workbench-host";
+import { PlanPanelToggle } from "~/components/workbench/plan-panel-toggle";
 import { ConversationFilesLauncherProvider } from "~/components/workbench/conversation-files-launcher";
 import { ContainerPlusMenu } from "~/components/workspace/container-plus-menu";
 import { ContainerTabBar } from "~/components/workspace/container-tab-bar";
@@ -95,6 +96,8 @@ import { SidebarBrandRow } from "~/components/sidebar-brand";
 import { WindowControlsBar, windowDragRegionProps } from "~/components/window-controls";
 import { ConversationTabStrip } from "~/components/workspace/conversation-tab-strip";
 import { EngineStatusBar } from "~/components/workspace/engine-status-bar";
+import { AgentRunPanel } from "~/components/workspace/agent-run-panel";
+import { AgentRunSelectionProvider } from "~/components/workspace/agent-run-selection";
 import { PaneContainerProvider } from "~/components/workspace/pane-container-context";
 import { WorkspaceEmptyState } from "~/components/workspace/workspace-empty-state";
 import { useCompressStore, useConversationCompressing } from "~/stores/compress-store";
@@ -105,6 +108,8 @@ import {
   type EditingSession,
 } from "~/stores/editing-store";
 import { useWorkspaceStore } from "~/stores/workspace-store";
+import { useChainExpandStore } from "~/stores/chain-expand-store";
+import { groupMessageParts, thinkingBlockKey } from "~/lib/message-grouping";
 import {
   CHAT_CONTAINER,
   MAX_PANES,
@@ -1339,6 +1344,70 @@ const ConversationTimeline = React.memo(
       };
     }, [activeId, detailError, detailLoading, focusMessageId, nodesOffset, selectedNodeMessages]);
 
+    // 运行面板与 PlanPanel 的证据 chip 带 `?msg=&tool=`:上面的 effect 先把消息滚进视口,
+    // 这里再把目标工具卡滚到中央并短暂描边。Virtuoso 虚拟化让锚点出现时机不定,所以用
+    // 递增延迟重试查找;tool 变化即重新定位,同一 tool 不重复打扰。
+    const focusToolCallId = searchParams.get("tool");
+    // 目标工具卡可能在被"最近 N 步"折叠的思考链里:先把所在链按用户展开写入链状态
+    // (key 与点击展开完全同源),否则 DOM 里根本没有这张卡,滚动与描边都无从谈起。
+    // 只展开链外壳,不展开工具卡内部——原始输入/输出仍保持默认折叠。
+    React.useEffect(() => {
+      if (!focusToolCallId) return;
+      const setExpanded = useChainExpandStore.getState().setExpanded;
+      for (const item of selectedNodeMessages) {
+        for (const message of item.node.messages) {
+          const holdsTarget = message.parts.some(
+            (part) => part.type === "tool" && part.toolCallId === focusToolCallId,
+          );
+          if (!holdsTarget) continue;
+          for (const block of groupMessageParts(message.parts)) {
+            if (
+              block.type === "thinking" &&
+              block.steps.some(
+                (step) => step.type === "tool" && step.tool.toolCallId === focusToolCallId,
+              )
+            ) {
+              setExpanded(`${message.id}:${thinkingBlockKey(block)}`, true);
+            }
+          }
+        }
+      }
+    }, [focusToolCallId, selectedNodeMessages]);
+
+    React.useEffect(() => {
+      if (!activeId || detailLoading || !focusMessageId || !focusToolCallId) return;
+      const focusKey = `${activeId}:tool:${focusToolCallId}`;
+      if (didInitialScrollRef.current === focusKey) return;
+      didInitialScrollRef.current = focusKey;
+      const escaped =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(focusToolCallId)
+          : focusToolCallId.replace(/["\\]/g, "\\$&");
+      const selector = `[data-tool-call-id="${escaped}"]`;
+      let cancelled = false;
+      let highlighted: HTMLElement | null = null;
+      let clearTimer: number | null = null;
+      const timers = [120, 320, 620, 1000, 1500].map((delay) =>
+        window.setTimeout(() => {
+          if (cancelled) return;
+          const root = scrollerElRef.current;
+          const el = (root instanceof HTMLElement ? root : document).querySelector<HTMLElement>(selector);
+          if (!el) return;
+          highlighted = el;
+          el.scrollIntoView({ block: "center", behavior: "auto" });
+          el.classList.add("rikkahub-tool-focus");
+          if (clearTimer !== null) window.clearTimeout(clearTimer);
+          clearTimer = window.setTimeout(() => el.classList.remove("rikkahub-tool-focus"), 2800);
+        }, delay),
+      );
+      return () => {
+        cancelled = true;
+        timers.forEach((timer) => window.clearTimeout(timer));
+        if (clearTimer !== null) window.clearTimeout(clearTimer);
+        highlighted?.classList.remove("rikkahub-tool-focus");
+      };
+    }, [activeId, detailLoading, focusMessageId, focusToolCallId]);
+
     // 首帧定位:Virtuoso 缺省从 index 0 开始渲染,挂载后再 scrollToIndex 会先画出
     // 列表中部、布局稳定后又跳一次(用户看到"中间→闪→末尾")。initialTopMostItemIndex
     // 让首帧就渲染在目标处,不产生滚动动作;上面的 scrollToIndex effect 保留,作为
@@ -1788,6 +1857,19 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
   const activeId = conversationId;
   // 非聚焦列永远有会话(多窗格不变量:空窗格即收起),"新对话"态只属于聚焦列。
   const paneIsHome = focused && isHomeRoute;
+
+  // 运行面板/计划证据“定位消息”:先聚焦本列(非聚焦列点击时路由要跟着本列),再复用
+  // 搜索定位的 `?msg=` 机制滚到消息;带 toolCallId 时页面会继续把工具卡滚到视口中央。
+  // 消息不存在由面板自行提示。
+  const handleLocateMessage = React.useCallback(
+    (messageId: string, toolCallId?: string) => {
+      if (!activeId) return;
+      onFocusPane(container, paneIndex);
+      const tool = toolCallId ? `&tool=${encodeURIComponent(toolCallId)}` : "";
+      navigate(`/c/${activeId}?msg=${encodeURIComponent(messageId)}${tool}`);
+    },
+    [activeId, container, navigate, onFocusPane, paneIndex],
+  );
 
   // 编辑绑定按会话键控全局存活(editing-store,与 drafts 同款):切走再切回续编辑,
   // 发送不再静默腐化成"发新消息"。窗格本地仅留 UI 瞬态。
@@ -2485,8 +2567,14 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
 
   return (
     <PaneContainerProvider container={container}>
+      <AgentRunSelectionProvider
+        conversationId={activeId}
+        onLocateMessage={handleLocateMessage}
+      >
       <div
-        className="relative flex h-full min-h-0 flex-1 flex-col"
+        className="chat-pane relative flex h-full min-h-0 flex-1 flex-col"
+        // chat-pane:输入区伴侣的容器查询基准(见 app.css .companion-dock)。按窗格宽度
+        // 而非视口决定宠物是否出现——分栏时视口很宽,但单列放不下左侧空档。
         // 点击非焦点列任意处 → 聚焦并把路由切到它的激活会话。会话标签自己会导航到它指定
         // 的会话(data-tab-nav),不能让这里先抢一次焦点切换,否则先跳本列旧会话、
         // 再跳目标会话,中间闪一帧。
@@ -2568,6 +2656,8 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
             {focused ? <TtsPlayBar /> : null}
             {/* pi 引擎瞬态状态条(P5):按窗格各自订阅本会话状态,分栏互不串扰。 */}
             <EngineStatusBar conversationId={activeId} />
+            {/* 本次运行(自主循环 S1):折叠流水条,实验开关关闭时不渲染。 */}
+            <AgentRunPanel conversationId={activeId} />
             {/* 语音模式横幅(免提对话循环;关闭时不渲染)。 */}
             {voiceActive && activeId ? (
               <VoiceModeBanner onEnd={() => voiceMode.stop()} onRetry={handleToggleVoiceMode} />
@@ -2869,6 +2959,7 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
           </DialogContent>
         </Dialog>
       </div>
+      </AgentRunSelectionProvider>
     </PaneContainerProvider>
   );
 });
@@ -3358,8 +3449,14 @@ function ConversationsPageInner() {
                         />
                       </div>
                       {/* 面板开着时由卡片头部（与左栏折叠钮镜像的 PanelRight）关闭，
-                    和左栏“展开后收起钮移入卡内”同构，不在标签行重复一个图标。 */}
-                      {!isMobile && !panel ? <WorkbenchToggle {...workbenchPanelContext} /> : null}
+                    和左栏“展开后收起钮移入卡内”同构，不在标签行重复一个图标。
+                    计划入口同理,且只在当前会话真的写过计划时才出现(组件内部自藏)。 */}
+                      {!isMobile && !panel ? (
+                        <>
+                          <PlanPanelToggle conversationId={workbenchPanelContext.conversationId} />
+                          <WorkbenchToggle {...workbenchPanelContext} />
+                        </>
+                      ) : null}
                     </div>
                     {/* 白色圆角内容面板:surface-200 底 + elevation-100,盖住撞色带主体,
                   焦点页签经连接条与面板连体;底部圆角与 wrapper 的 18px 对齐。
@@ -3453,7 +3550,12 @@ function ConversationsPageInner() {
                             </div>
                             {/* 同单组分支:面板开着时关闭入口在卡片头部,不在标签行重复。 */}
                             {groupIndex === groups.length - 1 && !panel ? (
-                              <WorkbenchToggle {...workbenchPanelContext} />
+                              <>
+                                <PlanPanelToggle
+                                  conversationId={workbenchPanelContext.conversationId}
+                                />
+                                <WorkbenchToggle {...workbenchPanelContext} />
+                              </>
                             ) : null}
                           </div>
                           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-[16px] rounded-b-[18px] bg-[var(--ds-surface-200)] shadow-[var(--ds-elevation-100)]">

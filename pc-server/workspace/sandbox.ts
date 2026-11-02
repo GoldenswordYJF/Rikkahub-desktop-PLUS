@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { dataDir } from "../foundation/paths";
 import { RUNNING_IN_CONTAINER, RUNTIME_PLATFORM } from "../foundation/platform";
 import { collectFolderWorkspaceRoots, readSandboxLabelRecord } from "./labeling";
+import { peekSandboxExtraWritableDirs } from "../persistence/json-store";
 
 export type SandboxTier = "off" | "restricted" | "full";
 export type SandboxMeasurement = "enforced" | "not_enforced" | "unknown";
@@ -144,7 +145,16 @@ let cached: SandboxStatus | null = null;
  *  非受限档下若记录仍在,说明上次还原没做完,点名残留。 */
 function integrityLabelNotes(tier: SandboxTier): string[] {
   const record = readSandboxLabelRecord(dataDir);
-  const expected = [dataDir, ...collectFolderWorkspaceRoots()];
+  // 额外可写目录（全局 + stdio MCP 自带）也属于"本应标注"：标注失败要在这里点名，
+  // 否则用户只会看到 MCP 报 Permission denied 而不知道该目录没被放行。
+  const expected: string[] = [];
+  const seenExpected = new Set<string>();
+  for (const dir of [dataDir, ...collectFolderWorkspaceRoots(), ...peekSandboxExtraWritableDirs()]) {
+    const key = dir.toLowerCase();
+    if (seenExpected.has(key)) continue;
+    seenExpected.add(key);
+    expected.push(dir);
+  }
   if (tier === "restricted") {
     const labeledSet = new Set((record?.dirs ?? []).map((dir) => dir.toLowerCase()));
     const labeled = expected.filter((dir) => labeledSet.has(dir.toLowerCase()));

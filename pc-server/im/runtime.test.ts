@@ -106,7 +106,10 @@ async function within<T>(promise: Promise<T>, timeoutMs = 1_000, label = "operat
   }
 }
 
-async function installFakeProvider(turns: Parameters<typeof startFakeOpenAiSse>[0]) {
+async function installFakeProvider(
+  turns: Parameters<typeof startFakeOpenAiSse>[0],
+  options: { transportRetry?: boolean } = {},
+) {
   const server = await startFakeOpenAiSse(turns);
   const ourModel = model("fake-model", "IM Test");
   const ourProvider = provider({
@@ -123,6 +126,11 @@ async function installFakeProvider(turns: Parameters<typeof startFakeOpenAiSse>[
   next.settings.providers = [ourProvider];
   next.settings.chatModelId = ourModel.id;
   next.settings.fastModelId = "";
+  // S4 传输重试默认开:断言"上游只收到 1 个请求"的失败用例要显式关掉,
+  // 否则故意注入的 500 会被重试两次(1s+2s 退避),测试既变慢也不再测想测的东西。
+  if (options.transportRetry === false) {
+    next.settings.agentLoop = { ...next.settings.agentLoop, transportRetry: false };
+  }
   setState(next as State);
   return server;
 }
@@ -445,7 +453,7 @@ describe("生成中停止与等待终态", () => {
     const server = await installFakeProvider([{
       beforeRespond: () => hold.promise,
       fail: { status: 500, message: "boom" },
-    }]);
+    }], { transportRetry: false });
     const sent: string[] = [];
     const { runtime, config } = makeRuntime(pairedConfig(), sent);
     active = runtime;

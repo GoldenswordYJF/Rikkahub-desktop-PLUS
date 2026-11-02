@@ -260,15 +260,24 @@ describe("审批矩阵经 tools/approval 联动(三档改版)", () => {
     const dangerous = approval.initialApprovalState("bash", fakeAssistant, conversation, JSON.stringify({ command: "rm -rf /" }));
     expect(dangerous.type).toBe("pending");
     expect((dangerous as { reason?: string }).reason).toContain("Destructive command pattern");
+    // O4:白名单结构化缘由进 pending 状态(run 流水据此记录,不含完整命令)
+    expect(dangerous).toMatchObject({ reasonCode: "destructive_command", ruleId: "rm_root" });
     const outside = approval.initialApprovalState("write", fakeAssistant, conversation, JSON.stringify({ path: "../outside.txt" }));
     expect(outside.type).toBe("pending");
     expect((outside as { reason?: string }).reason).toContain("Writes outside the workspace");
+    expect(outside).toMatchObject({ reasonCode: "outside_workspace_write" });
 
     ws.updateWorkspace(workspace.id, { permissionPreset: "confirm_each" });
     expect(approval.toolNeedsApproval("write", fakeAssistant, conversation)).toBe(true);
-    expect(approval.initialApprovalState("edit", fakeAssistant, conversation)).toEqual({ type: "pending" });
+    expect(approval.initialApprovalState("edit", fakeAssistant, conversation)).toMatchObject({
+      type: "pending",
+      reasonCode: "preset_confirm_each",
+    });
     // confirm_each 恒审批,无附加缘由
-    expect(approval.initialApprovalState("bash", fakeAssistant, conversation, JSON.stringify({ command: "ls" }))).toEqual({ type: "pending" });
+    expect(approval.initialApprovalState("bash", fakeAssistant, conversation, JSON.stringify({ command: "ls" }))).toMatchObject({
+      type: "pending",
+      reasonCode: "preset_confirm_each",
+    });
 
     ws.updateWorkspace(workspace.id, { permissionPreset: "full_access" });
     expect(approval.toolNeedsApproval("bash", fakeAssistant, conversation)).toBe(false);
@@ -280,6 +289,99 @@ describe("审批矩阵经 tools/approval 联动(三档改版)", () => {
   test("非工作区会话对同名工具不挂审批(执行层守卫兜底)", () => {
     expect(approval.toolNeedsApproval("bash", fakeAssistant, bindConversation(null))).toBe(false);
     expect(approval.toolNeedsApproval("bash", fakeAssistant, undefined)).toBe(false);
+  });
+});
+
+describe("O4 执行时点边界观测", () => {
+  test("守卫之后、执行之前产出一份快照;observer 抛错不影响执行", async () => {
+    const workspace = ws.createWorkspace({ type: "managed", name: "obs-boundary" });
+    const conversation = bindConversation(workspace.id);
+    const seen: Array<Record<string, unknown>> = [];
+    await runtime.runWorkspaceTool(
+      "write",
+      { path: "obs.txt", content: "ok" },
+      {
+        conversationId: conversation.id,
+        toolCallId: "tc-obs",
+        observer: (observation) => seen.push(observation as unknown as Record<string, unknown>),
+      },
+    );
+    expect(readFileSync(join(workspace.root, "obs.txt"), "utf8")).toBe("ok");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      toolCallId: "tc-obs",
+      toolName: "write",
+      stage: "execution",
+      access: "write",
+      targetScope: "inside",
+    });
+    const snapshot = seen[0]!.snapshot as { permissionPreset: string; effectiveWriteScope: string };
+    expect(snapshot.permissionPreset).toBe("balanced");
+    expect(snapshot.effectiveWriteScope).toBe("strict");
+
+    // 观测异常只降级为不可见:执行照常完成。
+    await runtime.runWorkspaceTool(
+      "write",
+      { path: "obs2.txt", content: "ok2" },
+      {
+        conversationId: conversation.id,
+        toolCallId: "tc-obs-2",
+        observer: () => {
+          throw new Error("observer boom");
+        },
+      },
+    );
+    expect(readFileSync(join(workspace.root, "obs2.txt"), "utf8")).toBe("ok2");
+  });
+
+  test("权限档变化产生新快照;系统沙箱生效时批准也不会出现宽写", async () => {
+    const { sandboxBoundaryActive } = await import("./sandbox");
+    const workspace = ws.createWorkspace({ type: "managed", name: "obs-narrow" });
+    const conversation = bindConversation(workspace.id);
+    const seen: Array<Record<string, unknown>> = [];
+    const observer = (observation: { snapshot: unknown }) =>
+      seen.push(observation.snapshot as Record<string, unknown>);
+
+    await runtime.runWorkspaceTool(
+      "write",
+      { path: "a.txt", content: "a" },
+      { conversationId: conversation.id, toolCallId: "tc-a", observer },
+    );
+    ws.updateWorkspace(workspace.id, { permissionPreset: "confirm_each" });
+    await runtime.runWorkspaceTool(
+      "write",
+      { path: "b.txt", content: "b" },
+      { conversationId: conversation.id, toolCallId: "tc-b", observer, userApproved: true },
+    );
+
+    expect(seen.map((snapshot) => snapshot.permissionPreset)).toEqual(["balanced", "confirm_each"]);
+    expect(seen[1]!.effectiveWriteScope).toBe(sandboxBoundaryActive() ? "strict" : "wide");
+  });
+
+  const shellOk = runtime.shellAvailability().available;
+  test.if(shellOk)("危险命令被守卫拦下时不产生执行观测;放行的执行才记账", async () => {
+    const workspace = ws.createWorkspace({ type: "managed", name: "obs-danger" });
+    const conversation = bindConversation(workspace.id);
+    const seen: Array<Record<string, unknown>> = [];
+    const observer = (observation: Record<string, unknown>) => seen.push(observation);
+
+    // 只验证拦截路径:绝不真正执行破坏性命令。
+    await expect(
+      runtime.runWorkspaceTool(
+        "bash",
+        { command: "rm -rf /" },
+        { conversationId: conversation.id, toolCallId: "tc-danger", observer: observer as never },
+      ),
+    ).rejects.toThrow(/destructive pattern/);
+    expect(seen).toHaveLength(0);
+
+    await runtime.runWorkspaceTool(
+      "bash",
+      { command: "echo approved" },
+      { conversationId: conversation.id, toolCallId: "tc-ok", observer: observer as never, userApproved: true },
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ toolCallId: "tc-ok", access: "execute" });
   });
 });
 

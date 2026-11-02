@@ -33,6 +33,8 @@ interface ChainOfThoughtStepBaseProps {
   active?: boolean;
   isFirst?: boolean;
   isLast?: boolean;
+  /** 工具卡定位锚点(`?msg=&tool=`)。只有工具步骤传,普通 CoT 步骤不产生假锚点。 */
+  dataToolCallId?: string;
 }
 
 interface ChainOfThoughtStepProps extends ChainOfThoughtStepBaseProps {
@@ -162,6 +164,7 @@ function ChainOfThoughtStepContent({
   active,
   isFirst,
   isLast,
+  dataToolCallId,
 }: ChainOfThoughtStepContentProps) {
   const hasContent = Boolean(children);
   const clickable = Boolean(onClick || hasContent);
@@ -211,7 +214,7 @@ function ChainOfThoughtStepContent({
   ) : null;
 
   return (
-    <div className={stepClassName}>
+    <div className={stepClassName} data-tool-call-id={dataToolCallId}>
       <div
         className={cn("flex w-6 shrink-0 flex-col items-center", clickable && "cursor-pointer")}
         onClick={clickable ? handleActivate : undefined}

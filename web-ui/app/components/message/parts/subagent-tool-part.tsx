@@ -173,6 +173,7 @@ export function SubagentDispatchPart({
         </span>
       }
       extra={elapsedSeconds !== null ? <ElapsedBadge seconds={elapsedSeconds} running={running} /> : undefined}
+      dataToolCallId={tool.toolCallId}
     >
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-1.5 text-mini text-muted-foreground">

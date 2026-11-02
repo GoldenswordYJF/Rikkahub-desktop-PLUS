@@ -132,6 +132,119 @@
       "notification_title": "AI 正在等待你的审批",
       "notification_body": "「{{summary}}」等待你审批"
     },
+    "agent_run": {
+      "title": "本次运行",
+      "history_title": "历史运行",
+      "latest_option": "最新运行",
+      "history_option": "{{time}} · {{status}} · {{rounds}} 轮",
+      "selector_label": "选择要回看的运行",
+      "newer_run": "有更新的运行，当前查看的是历史记录",
+      "history_readonly": "历史运行只读",
+      "back_to_latest": "回到最新",
+      "loading_history": "加载历史运行…",
+      "history_missing": "该运行记录已不可用",
+      "history_failed": "历史运行加载失败",
+      "load_older": "加载更早",
+      "loading_older": "加载中…",
+      "load_older_failed": "更早事件加载失败",
+      "loaded_events": "已加载 {{count}} 条",
+      "goal_label": "目标",
+      "terminal_reason": "结束原因：{{reason}}",
+      "locate": "定位消息",
+      "locate_missing": "该工具消息不在当前视图",
+      "live": "进行中",
+      "rounds": "{{count}} 轮",
+      "tools": "{{count}} 个工具",
+      "retries": "{{count}} 次重试",
+      "replans": "{{count}} 次重规划",
+      "empty": "暂无流水",
+      "unknown_event": "未识别事件（{{kind}}）",
+      "boundary_loading": "边界定义加载中…",
+      "boundary_unavailable": "边界定义不可用",
+      "filter": {
+        "all": "全部",
+        "tools": "工具",
+        "approval": "审批",
+        "retry_replan": "重试与重规划",
+        "issues": "异常"
+      },
+      "phase": {
+        "planning": "规划中",
+        "acting": "执行中",
+        "observing": "观察中",
+        "deciding": "判定中",
+        "replanning": "重规划中",
+        "verifying": "校验中",
+        "awaiting_approval": "等待审批",
+        "awaiting_user": "等待用户",
+        "retrying": "重试中"
+      },
+      "actions": {
+        "continue": "继续",
+        "change_goal": "改目标",
+        "continue_message": "继续",
+        "send_failed": "继续失败"
+      },
+      "status": {
+        "running": "运行中",
+        "suspended": "等待审批",
+        "succeeded": "已完成",
+        "failed": "失败",
+        "exhausted": "轮次耗尽",
+        "stalled": "停滞",
+        "stopped": "已停止"
+      },
+      "kind": {
+        "run_started": "开始运行（{{engine}}）",
+        "run_resumed": "继续运行（审批后）",
+        "round": "第 {{round}} 轮",
+        "tool_call": "调用工具 {{tool}}",
+        "tool_execution": "执行工具 {{tool}}",
+        "tool_result": "完成工具 {{tool}}",
+        "approval_pending": "等待审批 · {{tool}}",
+        "approval_pending_reason": "等待审批 · {{tool}}（{{reason}}）",
+        "approval_approved": "已批准 · {{tool}}",
+        "approval_denied": "已拒绝 · {{tool}}",
+        "approval_denied_reason": "已拒绝 · {{tool}}：{{reason}}",
+        "boundary": "权限边界：{{preset}} · {{scope}} · {{sandbox}}",
+        "retry": "传输重试 第 {{attempt}}/{{max}} 次",
+        "retry_no_max": "传输重试 第 {{attempt}} 次",
+        "run_finished": "{{status}}",
+        "run_finished_reason": "{{status}}（{{reason}}）",
+        "run_suspended": "等待审批，已暂停"
+      },
+      "boundary": {
+        "preset": {
+          "confirm_each": "逐项确认",
+          "balanced": "均衡",
+          "full_access": "完全访问"
+        },
+        "scope": {
+          "strict": "仅工作区内写入",
+          "wide": "可写工作区外"
+        },
+        "sandbox": {
+          "active": "系统沙箱生效",
+          "inactive": "无系统沙箱"
+        },
+        "access": {
+          "read": "读取",
+          "write": "写入",
+          "execute": "执行"
+        },
+        "target": {
+          "inside": "工作区内",
+          "outside": "工作区外",
+          "unknown": "目标未知"
+        },
+        "reason": {
+          "preset_confirm_each": "权限档位要求逐项确认",
+          "destructive_command": "破坏性命令",
+          "outside_workspace_write": "工作区外写入",
+          "mcp_tool_requires_approval": "MCP 工具要求审批"
+        }
+      }
+    },
     "translate": {
       "dialog_title": "选择翻译语言",
       "dialog_description": "译文会保存在当前回复下方，不会进入下一轮上下文。",

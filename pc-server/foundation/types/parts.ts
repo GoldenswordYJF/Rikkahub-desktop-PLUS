@@ -14,11 +14,25 @@
 
 import type { JsonValue } from "./index";
 
+/** O4:pending 审批的结构化缘由白名单。完整 reason 保留给审批卡,run 流水只带
+ *  reasonCode + 去路径化短缘由 + 危险规则 id,避免把本机路径复制进运行记录。 */
+export type ToolApprovalReasonCode =
+  | "preset_confirm_each"
+  | "destructive_command"
+  | "outside_workspace_write"
+  | "mcp_tool_requires_approval";
+
 export type ToolApprovalState =
   | { type: "auto" }
   // reason:审批缘由(危险命令说明/区外写入目标),前端审批卡展示;可选字段,缺省即
   // "档位要求逐项确认"。安卓端多态解码按 type 判别,新增可选字段不破契约。
-  | { type: "pending"; reason?: string }
+  | {
+      type: "pending";
+      reason?: string;
+      reasonCode?: ToolApprovalReasonCode;
+      reasonSummary?: string;
+      ruleId?: string;
+    }
   | { type: "approved" }
   | { type: "denied"; reason: string }
   | { type: "answered"; answer: string };

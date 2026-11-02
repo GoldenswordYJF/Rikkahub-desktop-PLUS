@@ -13,6 +13,7 @@ import {
   FileText,
   FolderOpen,
   Globe,
+  ListChecks,
   Loader2,
   MessageCircleQuestion,
   Search,
@@ -41,8 +42,10 @@ import {
   serializeAskUserAnswer,
   type AskUserQuestion,
 } from "@server/tools/ask-user";
+import { normalizePlan, PLAN_TOOL_NAME, planProgress } from "@server/tools/plan";
 
 import { ControlledChainOfThoughtStep } from "../chain-of-thought";
+import { useSettingsStore } from "~/stores";
 import {
   WorkspaceApprovalCard,
   ElapsedBadge,
@@ -290,8 +293,65 @@ function getToolIcon(toolName: string, action?: string) {
 
   if (toolName === TOOL_NAMES.ASK_USER) return MessageCircleQuestion;
   if (toolName === TOOL_NAMES.USE_SKILL) return Sparkles;
+  if (toolName === PLAN_TOOL_NAME) return ListChecks;
 
   return Wrench;
+}
+
+// ── 单行工具 trace(displaySetting.toolTraceCompact)───────────────────
+// Claude Code 把每次工具调用压成 `● Bash(npm test)` 一行。这里等价实现:标题右侧挂一句
+// 参数摘要,状态(拒绝/失败/媒体数/结果数)做成同行徽标,预览区默认收起。
+const TRACE_ARG_KEYS = [
+  "query",
+  "url",
+  "path",
+  "file_path",
+  "filename",
+  "name",
+  "pattern",
+  "command",
+  "key",
+  "skill",
+  "server",
+  "text",
+  "content",
+  "prompt",
+];
+const TRACE_ARG_MAX_LEN = 64;
+
+function traceArgValue(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number") return String(value);
+  return null;
+}
+
+/** 取一句能读懂的入参摘要;标题里已经写了同样的字就不重复(search_web / read 自带)。 */
+function getToolArgSummary(toolName: string, args: unknown, title: string): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  // 计划行:标题本身就是「更新计划「…」 3/7」,再挂一句 title: … 是同一句话写两遍。
+  if (toolName === PLAN_TOOL_NAME) return null;
+  const record = args as Record<string, unknown>;
+  let summary: string | null = null;
+  for (const key of TRACE_ARG_KEYS) {
+    const value = traceArgValue(record[key]);
+    if (value) {
+      summary = value;
+      break;
+    }
+  }
+  if (!summary) {
+    for (const [key, raw] of Object.entries(record)) {
+      const value = traceArgValue(raw);
+      if (value) {
+        summary = `${key}: ${value}`;
+        break;
+      }
+    }
+  }
+  if (!summary) return null;
+  const oneLine = summary.replace(/\s+/g, " ");
+  if (title.includes(oneLine) || title.includes(oneLine.slice(0, TRACE_ARG_MAX_LEN))) return null;
+  return oneLine.length > TRACE_ARG_MAX_LEN ? `${oneLine.slice(0, TRACE_ARG_MAX_LEN - 1)}…` : oneLine;
 }
 
 function getToolTitle(toolName: string, args: unknown, t: TFunction): string {
@@ -326,6 +386,20 @@ function getToolTitle(toolName: string, args: unknown, t: TFunction): string {
   }
 
   if (toolName === TOOL_NAMES.ASK_USER) return t("tool_part.ask_user_title");
+
+  // 计划工具:一行要能看出「这是第几版计划、推到哪了」,所以把进度写进标题,
+  // 而不是留一句 `title: …` 的参数摘要(见 getToolArgSummary)。
+  if (toolName === PLAN_TOOL_NAME) {
+    const plan = normalizePlan(args);
+    const progress = planProgress(plan);
+    return plan.title
+      ? t("tool_part.plan_update_named", {
+          title: plan.title,
+          done: progress.completed,
+          total: progress.total,
+        })
+      : t("tool_part.plan_update", { done: progress.completed, total: progress.total });
+  }
 
   if (toolName === TOOL_NAMES.USE_SKILL) {
     const skillName = getStringField(args, "name");
@@ -632,6 +706,7 @@ function AskUserToolStep({
         className="my-2 rounded-2xl border border-primary/40 bg-primary/5 px-4 py-3 shadow-sm ring-1 ring-primary/10"
         role="region"
         aria-live="polite"
+        data-tool-call-id={tool.toolCallId}
       >
         <div className="flex items-start gap-2.5">
           <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
@@ -740,6 +815,7 @@ function AskUserToolStep({
       }
       label={<span className="text-foreground line-clamp-2 text-xs font-medium">{title}</span>}
       extra={elapsedSeconds !== null ? <ElapsedBadge seconds={elapsedSeconds} running={Boolean(loading)} /> : undefined}
+      dataToolCallId={tool.toolCallId}
     >
       <div className="space-y-3 w-full">
         {questions.map((q) => (
@@ -796,7 +872,13 @@ export function ToolPart({
   }
 
   const { t } = useTranslation("message");
-  const [expanded, setExpanded] = React.useState(true);
+  // 折成一行 = 步骤默认收起预览。用户在某一步上手动展开/收起过(expandOverride)就以他为准;
+  // 设置页改开关时,没被手动动过的步骤会跟着重新流动——这是刻意的(开关就该管全局)。
+  const compactTrace = useSettingsStore(
+    (state) => state.settings?.displaySetting?.toolTraceCompact !== false,
+  );
+  const [expandOverride, setExpandOverride] = React.useState<boolean | null>(null);
+  const expanded = expandOverride ?? !compactTrace;
   const [drawerOpen, setDrawerOpen] = React.useState(false);
 
   const args = React.useMemo(() => safeJsonParse(tool.input), [tool.input]);
@@ -860,6 +942,30 @@ export function ToolPart({
   // 消息在生成中(loading 含 output 门:结果落地即终局)或审批等待仍在挂起。
   const elapsedSeconds = useToolElapsedSeconds(tool, messageCreatedAt, messageFinishedAt, Boolean(loading) || (isPending && Boolean(awaitingApproval)));
 
+  const argSummary = React.useMemo(() => getToolArgSummary(tool.toolName, args, title), [args, title]);
+  const mediaCount = React.useMemo(
+    () =>
+      tool.output.filter((part) => part.type === "image" || part.type === "video" || part.type === "audio")
+        .length,
+    [tool.output],
+  );
+  // 同行徽标:折叠成一行后,失败/拒绝/产物数量这些原本长在预览区里的信号必须留在行上,
+  // 否则"这步到底成没成"要点开才知道。优先级:拒绝 > 失败 > 媒体 > 搜索结果数。
+  // 展开态只留红徽:预览区自己就写着「检索到 N 条结果」/失败详情,行上再挂一枚同义徽是重复。
+  const traceChip = React.useMemo(() => {
+    if (isDenied) return { danger: true, text: t("tool_part.trace_denied") };
+    if (mcpFailure !== null) return { danger: true, text: t("tool_part.trace_failed") };
+    if (expanded) return null;
+    if (hasMediaOutput) {
+      return { danger: false, text: t("tool_part.trace_media", { count: mediaCount }) };
+    }
+    const results = getArrayField(outputContent, "items").length;
+    if (tool.toolName === TOOL_NAMES.SEARCH_WEB && results > 0) {
+      return { danger: false, text: t("tool_part.trace_results", { count: results }) };
+    }
+    return null;
+  }, [isDenied, mcpFailure, expanded, hasMediaOutput, mediaCount, outputContent, tool.toolName, t]);
+
   const handleApprove = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     if (!onToolApproval) return;
@@ -878,10 +984,11 @@ export function ToolPart({
     <>
       <ControlledChainOfThoughtStep
         expanded={expanded}
-        onExpandedChange={setExpanded}
+        onExpandedChange={setExpandOverride}
         isFirst={isFirst}
         isLast={isLast}
         active={loading}
+        dataToolCallId={tool.toolCallId}
         icon={
           loading ? (
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -892,11 +999,36 @@ export function ToolPart({
         label={
           <span className="flex min-w-0 items-center gap-1.5">
             <SubagentOwnerBadge tool={tool} />
-            <span className="text-foreground line-clamp-2 text-xs font-medium">{title}</span>
+            {/* 折成一行时标题也收成一行,摘要跟着走;非 compact 维持原来的两行标题。 */}
+            <span
+              className={cn(
+                "text-foreground text-xs font-medium",
+                compactTrace ? "truncate" : "line-clamp-2",
+              )}
+            >
+              {title}
+            </span>
+            {argSummary ? (
+              <span className="text-muted-foreground/80 min-w-0 truncate font-mono text-xs">
+                {argSummary}
+              </span>
+            ) : null}
           </span>
         }
         extra={
           <span className="flex shrink-0 items-center gap-1.5">
+            {traceChip ? (
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[0.6875rem] leading-none",
+                  traceChip.danger
+                    ? "bg-destructive/10 text-destructive"
+                    : "bg-muted/60 text-muted-foreground",
+                )}
+              >
+                {traceChip.text}
+              </span>
+            ) : null}
             {isPending && onToolApproval ? (
               <span className="flex items-center gap-1">
                 <Button onClick={handleDeny} size="icon-xs" type="button" variant="secondary">
@@ -1169,6 +1301,7 @@ export function PendingToolAttentionCard({
       className="my-2 rounded-2xl border border-primary/40 bg-primary/5 px-4 py-3 shadow-sm ring-1 ring-primary/10"
       role="region"
       aria-live="polite"
+      data-tool-call-id={tool.toolCallId}
     >
       <div className="flex items-start gap-2.5">
         <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">

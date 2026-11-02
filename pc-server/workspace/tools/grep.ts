@@ -13,6 +13,21 @@ import { Glob } from "bun";
 import { resolveToCwd } from "./path-utils";
 import { walkDirectory } from "./fs-walk";
 import {
+  emptySearchCoverage,
+  hasSearchGaps,
+  noResultWithCoverage,
+  searchCoverageDescriptionAppend,
+  searchCoverageNotice,
+  type SearchCoverage,
+} from "../ops/search-coverage";
+import {
+  capRenderedLines,
+  persistToolResult,
+  RESULT_COLLECT_CAP,
+  RESUME_SEARCH_DESCRIPTION_APPEND,
+  searchResumeNotice,
+} from "../ops/resume-truncation";
+import {
   DEFAULT_MAX_BYTES,
   formatSize,
   GREP_MAX_LINE_LENGTH,
@@ -41,6 +56,10 @@ export interface GrepToolDetails {
   matchLimitReached?: number;
   linesTruncated?: boolean;
   visitCapReached?: boolean;
+  /** S5:覆盖计数(仅开关开启且存在缺口时出现;旧字段名与语义不变)。 */
+  coverage?: SearchCoverage;
+  /** S6:完整结果落盘路径(仅开关开启且命中上限/截断时出现)。 */
+  fullOutputPath?: string;
 }
 
 /**
@@ -67,6 +86,12 @@ export interface GrepToolOptions {
   operations?: GrepOperations;
   /** 单文件体积上限(超过静默跳过)。Default: 512KB */
   maxFileBytes?: number;
+  /** S5:覆盖可见化开关(默认关 → 输出与历史逐字一致;开启才采集计数并追加说明)。 */
+  coverageHonesty?: boolean;
+  /** S6:命中上限时把收集到的完整结果落盘并给出续读路径(默认关 → 历史行为)。 */
+  resumeTruncatedOutput?: boolean;
+  /** S6 落盘目录(工作区 tmp/)。resumeTruncatedOutput 开启时生效。 */
+  tempFileDir?: string;
 }
 
 const GREP_SCHEMA = {
@@ -121,9 +146,20 @@ export function createGrepTool(
 ): WorkspaceToolDefinition<GrepToolInput, GrepToolDetails | undefined> {
   const ops = options?.operations ?? defaultGrepOperations;
   const maxFileBytes = options?.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const coverageHonesty = options?.coverageHonesty === true;
+  const resumeOutput = options?.resumeTruncatedOutput === true;
+  const tempFileDir = options?.tempFileDir;
+  const coverageOptions = {
+    noun: "file" as const,
+    // 用实际生效的单文件上限(测试/自定义 maxFileBytes 时标签仍然诚实)。
+    sizeLabel: formatSize(maxFileBytes).replace(".0KB", "KB"),
+  };
   return {
     name: "grep",
-    description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
+    description:
+      `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`
+      + (coverageHonesty ? searchCoverageDescriptionAppend("file") : "")
+      + (resumeOutput ? RESUME_SEARCH_DESCRIPTION_APPEND : ""),
     parameters: GREP_SCHEMA as unknown as Record<string, unknown>,
     async execute({ pattern, path: searchDir, glob, ignoreCase, literal, context, limit }, signal?) {
       const throwIfAborted = (): void => {
@@ -153,28 +189,42 @@ export function createGrepTool(
 
       let matchCount = 0;
       let matchLimitReached = false;
+      let collectionCapReached = false;
       let linesTruncated = false;
       const matches: GrepMatch[] = [];
+      const coverage = emptySearchCoverage();
+      // S6:开启续读时,显示上限之外继续收集到安全帽,落盘文件才有续读价值;
+      // 关闭时收集上限 = 显示上限,行为与历史逐字一致。
+      const collectLimit = resumeOutput ? Math.max(effectiveLimit, RESULT_COLLECT_CAP) : effectiveLimit;
 
       const searchFile = async (absolutePath: string, relativePath: string): Promise<boolean> => {
         throwIfAborted();
         try {
           const size = await ops.statSize(absolutePath);
-          if (size > maxFileBytes) return true;
+          if (size > maxFileBytes) {
+            coverage.oversized++;
+            return true;
+          }
           const buffer = await ops.readFile(absolutePath);
-          if (looksBinary(buffer)) return true;
+          if (looksBinary(buffer)) {
+            coverage.binary++;
+            return true;
+          }
+          coverage.scanned++;
           const lines = buffer.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (!regex.test(lines[i])) continue;
             matchCount++;
             matches.push({ relativePath, lineNumber: i + 1, lines });
-            if (matchCount >= effectiveLimit) {
-              matchLimitReached = true;
+            if (matchCount >= effectiveLimit) matchLimitReached = true;
+            if (matchCount >= collectLimit) {
+              collectionCapReached = true;
               return false;
             }
           }
         } catch {
           // 不可读文件跳过,不让单点故障终止全局搜索
+          coverage.unreadable++;
         }
         return true;
       };
@@ -196,6 +246,8 @@ export function createGrepTool(
           },
         });
         visitCapReached = walk.visitCapReached;
+        coverage.visitCapReached = visitCapReached;
+        coverage.unreadable += walk.unreadableDirs;
         for (const candidate of candidates) {
           if (!(await searchFile(candidate.absolutePath, candidate.relativePath))) break;
         }
@@ -203,31 +255,52 @@ export function createGrepTool(
       throwIfAborted();
 
       if (matchCount === 0) {
-        return { content: [{ type: "text", text: "No matches found" }], details: undefined };
+        // S5:有缺口时"没找到"不等于"不存在"——补覆盖说明,不再给总数断言。
+        const text = coverageHonesty
+          ? noResultWithCoverage("No matches found", coverage, coverageOptions)
+          : "No matches found";
+        return {
+          content: [{ type: "text", text }],
+          details: coverageHonesty && hasSearchGaps(coverage) ? { coverage } : undefined,
+        };
       }
 
       // 输出格式与 pi 逐字一致:匹配行 path:line: text;上下文行 path-line- text
-      const outputLines: string[] = [];
-      for (const match of matches) {
-        const start = contextValue > 0 ? Math.max(1, match.lineNumber - contextValue) : match.lineNumber;
-        const end = contextValue > 0 ? Math.min(match.lines.length, match.lineNumber + contextValue) : match.lineNumber;
-        for (let current = start; current <= end; current++) {
-          const lineText = match.lines[current - 1] ?? "";
-          const { text: truncatedText, wasTruncated } = truncateLine(lineText);
-          if (wasTruncated) linesTruncated = true;
-          if (current === match.lineNumber) outputLines.push(`${match.relativePath}:${current}: ${truncatedText}`);
-          else outputLines.push(`${match.relativePath}-${current}- ${truncatedText}`);
+      // 落盘文件用完整行文本(forFile=true 不截断长行),展示走 truncateLine。
+      const renderMatchLines = (list: GrepMatch[], forFile: boolean): { lines: string[]; hitLineTruncation: boolean } => {
+        const outputLines: string[] = [];
+        let hitTruncation = false;
+        for (const match of list) {
+          const start = contextValue > 0 ? Math.max(1, match.lineNumber - contextValue) : match.lineNumber;
+          const end = contextValue > 0 ? Math.min(match.lines.length, match.lineNumber + contextValue) : match.lineNumber;
+          for (let current = start; current <= end; current++) {
+            const lineText = match.lines[current - 1] ?? "";
+            let renderedText = lineText;
+            if (!forFile) {
+              const rendered = truncateLine(lineText);
+              renderedText = rendered.text;
+              if (rendered.wasTruncated) hitTruncation = true;
+            }
+            if (current === match.lineNumber) outputLines.push(`${match.relativePath}:${current}: ${renderedText}`);
+            else outputLines.push(`${match.relativePath}-${current}- ${renderedText}`);
+          }
         }
-      }
+        return { lines: outputLines, hitLineTruncation: hitTruncation };
+      };
 
-      const rawOutput = outputLines.join("\n");
+      const displayRendered = renderMatchLines(matches.slice(0, effectiveLimit), false);
+      linesTruncated = displayRendered.hitLineTruncation;
+      const rawOutput = displayRendered.lines.join("\n");
       // Apply byte truncation. There is no line limit here because the match limit already capped rows.
       const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
       let output = truncation.content;
       const details: GrepToolDetails = {};
       const notices: string[] = [];
       if (matchLimitReached) {
-        notices.push(`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`);
+        notices.push(
+          `${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`
+          + (coverageHonesty ? ` Searched ${coverage.scanned} files before the limit.` : ""),
+        );
         details.matchLimitReached = effectiveLimit;
       }
       if (truncation.truncated) {
@@ -238,11 +311,36 @@ export function createGrepTool(
         notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
         details.linesTruncated = true;
       }
-      if (visitCapReached && !matchLimitReached) {
-        notices.push("Directory tree too large, search stopped early. Narrow the path argument");
+      // S6:命中显示上限/字节截断时,把本轮收集到的完整结果落盘并给续读路径。
+      if (resumeOutput && tempFileDir && (matchLimitReached || truncation.truncated) && matches.length > 0) {
+        const fileRendered = capRenderedLines(renderMatchLines(matches, true).lines);
+        const persisted = await persistToolResult({ tempFileDir, prefix: "pi-grep", lines: fileRendered.lines });
+        if (persisted) {
+          notices.push(
+            searchResumeNotice(persisted, {
+              noun: "match",
+              capReached: collectionCapReached || fileRendered.capReached,
+            }),
+          );
+          details.fullOutputPath = persisted.path;
+        }
+      }
+      if (visitCapReached) {
         details.visitCapReached = true;
+        // S5 开启时覆盖说明已包含"遍历安全罩截断";关闭时保持原文案(且仍按旧规则
+        // 在命中上限时不重复提示)。
+        if (!matchLimitReached && !coverageHonesty) {
+          notices.push("Directory tree too large, search stopped early. Narrow the path argument");
+        }
       }
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+      if (coverageHonesty) {
+        const coverageNotice = searchCoverageNotice(coverage, coverageOptions);
+        if (coverageNotice) {
+          output += `\n\n${coverageNotice}`;
+          details.coverage = coverage;
+        }
+      }
       return {
         content: [{ type: "text", text: output }],
         details: Object.keys(details).length > 0 ? details : undefined,

@@ -2,6 +2,8 @@
 // 纪律：本文件只定义类型与回调契约，不写具体实现，避免被 server.ts 的细节污染。
 
 import type { JsonValue, Message, MessageNode, StreamHooks, ToolApprovalState, ToolOutputEntry } from "../foundation/types";
+import type { ToolBoundaryObserver } from "../foundation/tool-boundary";
+import type { PlanContext } from "../tools/plan-context";
 import type { SubagentChildRunner } from "../tools/subagent";
 
 /** 本次生成的流式落点(活视图)。steer 边界分裂会把落点换到新开的 continuation 节点,
@@ -14,8 +16,10 @@ export interface GenerationTarget {
 }
 
 /** 生成过程中产生的单个事件。协调器（generateAnswer）根据这些事件更新消息、
- *  持久化状态和广播 SSE；推理引擎本身不直接执行副作用。 */
-export type GenerationEvent =
+ *  持久化状态和广播 SSE；推理引擎本身不直接执行副作用。
+ *  自主循环(S1):union 与可选 runId 取交集——引擎照旧构造事件,sink 出口由协调器统一
+ *  补齐 runId(开关关闭时不填),旧消费方忽略未知字段。 */
+export type GenerationEvent = (
   | { kind: "text_delta"; text: string }
   | { kind: "reasoning_delta"; text: string; metadata?: Record<string, JsonValue> }
   | { kind: "image_delta"; url: string; metadata?: Record<string, JsonValue> }
@@ -49,7 +53,12 @@ export type GenerationEvent =
   | { kind: "engine_fidelity"; message: EngineMessageFidelity }
   | { kind: "finished"; content: string; stopReason: string | null }
   | { kind: "error"; error: string }
-  | { kind: "abort" };
+  | { kind: "abort" }
+) & {
+  /** 自主循环(S1):所属运行的 id。引擎构造事件时不填,协调器 sink 在开关启用且
+   *  本次有 run 时统一补齐;未启用时保持缺省,与引入前逐字一致。 */
+  runId?: string;
+};
 
 /** 引擎 assistant 消息的保真块(P7 会话数据统一)。parts 是合并视图(连续同类增量
  *  并入同一 part),blocks 记录引擎侧真实块边界:len 把合并后的 part 文本切回原块,
@@ -101,6 +110,12 @@ export type EngineStatus =
       toolName?: string;
       /** awaiting_approval:审批对象一句话摘要(截断后的命令/路径)。 */
       summary?: string;
+      /** 自主循环(S1):所属运行 id 与实时计数(仅 total 开关启用时填充,旧前端忽略)。 */
+      runId?: string;
+      round?: number;
+      attempts?: number;
+      replanCount?: number;
+      stallReason?: string;
     };
 
 /** 事件接收器。Provider 流式函数在解析到增量时调用它。 */
@@ -132,6 +147,12 @@ export interface ToolContext {
    *  独立审批 scope）。pi 引擎不用它（子工具在 pi-engine/subagent-tools 里自带
    *  runner 闭包）；工作区/无工作区会话由协调器按各自 cwd 注入。 */
   createSubagentRunner?: () => SubagentChildRunner;
+  /** 自主循环(S2)：update_plan 的改写保护前值。协调器/pi 通用工具在调用
+   *  update_plan 时按会话消息流现算；其余工具不携带。缺省 = 首次发布。 */
+  planContext?: PlanContext;
+  /** 多步可观测性(O4)：执行时点边界观测；由协调器适配到当前 run tracker。
+   *  工具层只负责把观察项交出去，不感知 run/SSE。 */
+  boundaryObserver?: ToolBoundaryObserver;
 }
 
 /** 工具执行的标准化返回值。
@@ -143,6 +164,31 @@ export interface ToolResult {
   /** 工具想创建的文件描述符列表（如 MCP 图片）。由协调器统一落盘，避免工具直接修改 global state.files。 */
   fileCreations?: Array<{ data: string; mime: string; prefix: string }>;
 }
+
+/** 自主循环(S3):一次工具执行的观察项。判定器只看这五项,不碰消息正文。
+ *  errorSignature 由 agent-loop/controller.ts 归一化(工具名 + 去掉易变 id/数字的错误文本);
+ *  成功执行为 null。 */
+export interface LoopToolObservation {
+  toolCallId: string;
+  toolName: string;
+  /** 模型提交的原始参数 JSON(判定器自行规范化)。 */
+  arguments: string;
+  /** 输出文本拼合(错误载荷也算在这里)。 */
+  outputText: string;
+  errorSignature: string | null;
+}
+
+/** 自主循环(S3):轮边界判定结果。continue = 照常;inject = 把 text 作为一条模型面
+ *  附加指示注入下一轮(不落库、不生成用户气泡);halt = 以指定终局收尾,
+ *  由协调器落运行记录并交给人处理。 */
+export type LoopDecision =
+  | { action: "continue" }
+  | { action: "inject"; text: string }
+  | {
+      action: "halt";
+      status: "stalled" | "awaiting_user" | "exhausted" | "failed";
+      reason: string;
+    };
 
 /** 推理引擎对工具执行层的抽象。实现可以暂时仍是 server.ts 里的 executeToolCall，
  *  但接口保证二者不形成循环 import。 */
@@ -158,6 +204,26 @@ export type StreamHooksWithSink = StreamHooks & {
    *  落库 user 节点 + 通知 FIFO 队列移除,返回各消息的文本数组(空数组 = 无注入)。
    *  引擎只拿文本编码进请求体,落库/队列/广播全在协调器——副作用不进引擎层。 */
   onSteerBoundary?: () => string[];
+  /** S9 工具发现行:轮边界刷新工具数组。骨架在 encodeNextTurn 之后调用;返回
+   *  undefined = 不改本轮请求体(无新激活工具 / 开关关闭)。实现由协调器注入——
+   *  只有它能安全读写会话激活集并按 provider 重建 tools 形状。 */
+  refreshTools?: (body: Record<string, unknown>) => Record<string, unknown> | undefined;
+  /** 自主循环(S1):轮边界观察点。骨架在每轮发请求前调用(round 从 1 起);
+   *  协调器注入 = 运行记录计数,引擎层零感知。不传 = 无观测(开关关闭)。 */
+  onRunBoundary?: (round: number) => void;
+  /** 自主循环(S3):工具批执行完、下一次模型请求前调用。引擎把本轮实际的工具调用交给
+   *  判定器,返回 inject 时由引擎把提示注入下一轮(不落库、不产 user 气泡),返回 halt
+   *  时抛 AgentLoopHaltError。不传 = 判定表关闭(开关关闭时零行为差)。 */
+  onToolRoundEnd?: (observations: LoopToolObservation[]) => LoopDecision;
+  /** 自主循环(S3):模型本轮未调用工具、即将收尾时调用。完成校验不通过时返回 inject
+   *  (重采样)或 halt(停滞)。不传 = 不校验,维持旧"无工具调用即答完"语义。 */
+  onFinalCandidate?: () => LoopDecision;
+  /** 自主循环(S4):传输重试开关(true 才启用;缺省/false = 与引入前逐字一致)。
+   *  只作用于"本轮尚无任何可见输出且尚未执行过工具"的 fetch / !ok 失败:408/429/5xx/
+   *  网络瞬断/响应头超时按 1s→2s 退避重试,最多 3 次尝试;尊重 Retry-After;不占轮预算。
+   *  已输出内容、副作用工具之后、用户中止、4xx/配额计费一律不重试。设置里
+   *  transportRetry 默认开,且独立于 agentLoop.enabled。 */
+  transportRetry?: boolean;
 };
 
 /** 工具调度上下文：在工具执行回调外再包一层 executeTool 引用，

@@ -444,14 +444,18 @@ export async function readClaudeJsonRound(
       hooks.sink?.({ kind: "text_delta", text: block.text });
     } else if (type === "tool_use" && hooks.message) {
       const name = String(block.name ?? "");
+      const toolCallId = String(block.id ?? id());
       const inputJson = JSON.stringify(isRecord(block.input) ? block.input : {});
       finishReasoningParts(hooks.message);
       hooks.sink?.({
         kind: "tool_call_created",
-        toolCallId: String(block.id ?? id()),
+        toolCallId,
         toolName: name,
         input: inputJson,
-        approvalState: initialApprovalState(name, assistant, hooks.conversation, inputJson),
+        approvalState: initialApprovalState(name, assistant, hooks.conversation, inputJson, {
+          toolCallId,
+          ...(hooks.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+        }),
       });
       touchStream(hooks);
     }
@@ -495,6 +499,16 @@ export async function streamClaudeChatWithTools(
     // 非流式响应头要等全文生成完,长思考模型 5 分钟以上很常见,300s 会误杀)。
     headerTimeoutMs: () => 600_000,
     makeNonStreamBody: (requestBody) => ({ ...requestBody, stream: false }),
+    // S9 工具发现行:轮边界工具数组刷新由协调器注入(见 tool-loop 的 encodeNextBody)。
+    // 刷新成功后同步更新本 adapter 的回放基线——encodeNextTurn 从 body 展开,若仍用
+    // 首轮 body,再下一轮就会把新激活工具的 schema 还原掉。
+    refreshTools: hooks.refreshTools
+      ? (next) => {
+          const refreshed = hooks.refreshTools!(next);
+          if (refreshed) body = refreshed as Record<string, any>;
+          return refreshed;
+        }
+      : undefined,
     async readRound(response, sig, nonStream) {
       const round = nonStream
         ? await readClaudeJsonRound(response, hooks, assistant)
@@ -649,7 +663,10 @@ export async function fetchClaudeTextWithTools(
         toolName: toolCall.function.name,
         input: toolCall.function.arguments,
         output: [],
-        approvalState: initialApprovalState(toolCall.function.name, assistant, hooks?.conversation, toolCall.function.arguments),
+        approvalState: initialApprovalState(toolCall.function.name, assistant, hooks?.conversation, toolCall.function.arguments, {
+          toolCallId: toolCall.id,
+          ...(hooks?.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+        }),
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
@@ -773,7 +790,10 @@ function applyGoogleRoundChunk(
           toolName: name,
           input: JSON.stringify(args),
           // Gemini 函数调用整体到达，建卡即参数齐备的终局审批态
-          approvalState: initialApprovalState(name, assistant, hooks.conversation, JSON.stringify(args)),
+          approvalState: initialApprovalState(name, assistant, hooks.conversation, JSON.stringify(args), {
+            toolCallId: callId,
+            ...(hooks.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+          }),
         });
         touchStream(hooks);
       }
@@ -901,6 +921,15 @@ export async function streamGoogleChatWithTools(
     // 理由同 Claude/OpenAI 适配器处注释)。
     headerTimeoutMs: () => 600_000,
     makeNonStreamBody: (requestBody) => requestBody,
+    // S9 工具发现行:轮边界工具数组刷新由协调器注入(见 tool-loop 的 encodeNextBody)。
+    // 同 Claude:刷新成功后更新回放基线,避免再下一轮还原 tools。
+    refreshTools: hooks.refreshTools
+      ? (next) => {
+          const refreshed = hooks.refreshTools!(next);
+          if (refreshed) body = refreshed as Record<string, any>;
+          return refreshed;
+        }
+      : undefined,
     async readRound(response, sig, nonStream) {
       const round = nonStream
         ? await readGoogleJsonRound(response, hooks, assistant)
@@ -1019,13 +1048,17 @@ export async function fetchOpenAiText(
       // arguments 经 toolArgumentsJson 归一(""→"{}"):不规范上游会回空串,?? 接不住,空参
       // 工具卡落库后在下一轮历史编码里就是严格端点 400 的弹药(见 toolArgumentsJson 头注)。
       const toolArguments = toolArgumentsJson(toolCall.function?.arguments);
+      const toolCallId = String(toolCall.id ?? id());
       const toolPart: ToolPart = {
         type: "tool",
-        toolCallId: String(toolCall.id ?? id()),
+        toolCallId,
         toolName: String(toolCall.function?.name ?? ""),
         input: toolArguments,
         output: [],
-        approvalState: initialApprovalState(String(toolCall.function?.name ?? ""), assistant, hooks?.conversation, toolArguments),
+        approvalState: initialApprovalState(String(toolCall.function?.name ?? ""), assistant, hooks?.conversation, toolArguments, {
+          toolCallId,
+          ...(hooks?.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+        }),
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
@@ -1830,6 +1863,15 @@ export async function fetchOpenAiTextStreaming(
     // R3-1:头超时统一 600s(原 OpenAI 自建包装,现下沉为骨架能力;用户需求 2026-08-01:
     // 非流式从 300s 对齐流式 600s——非流式响应头要等全文生成完,长思考模型误杀风险更高)。
     headerTimeoutMs: () => 600_000,
+    // S9 工具发现行:轮边界工具数组刷新由协调器注入(见 tool-loop 的 encodeNextBody)。
+    // 同 Claude:刷新成功后更新回放基线,避免再下一轮还原 tools。
+    refreshTools: hooks.refreshTools
+      ? (next) => {
+          const refreshed = hooks.refreshTools!(next);
+          if (refreshed) body = refreshed as Record<string, any>;
+          return refreshed;
+        }
+      : undefined,
     async readRound(response, sig) {
       const r = await readOpenAiResponseIntoMessage(response, hooks, sig, assistant);
       // 稀疏数组洞与无名条目过滤:Responses API 流按 output_index 建槽,function_call 与

@@ -9,7 +9,7 @@ import { frozenContextBlocks } from "./context-snapshots";
 import { buildSearchContext } from "../search";
 import { findModel } from "../model-providers";
 import { listSkills } from "../tools/skills";
-import { conversationFunctionTools } from "../tools/bound";
+import { conversationToolsWithDiscovery, toolDiscoverySystemContext } from "../tools/discovery-store";
 import { GOOGLE_SAFETY_SETTINGS, apiContentFromParts, apiContentText, appendAssistantApiMessages, googleContentsFromApiMessages, googleFunctionDeclarations, googleGenerationConfig, hasBuiltInTool, hostOfProvider, responseApiMessagesFromUiMessages, supportsAbility, supportsOutputModality } from "./message-builder";
 import { responsesHistoryReasoningAllowed } from "../model-providers/request-dialect";
 import { isEmptyAssistantPlaceholder } from "./parts";
@@ -35,25 +35,39 @@ ${body}
 </available_skills>`;
 }
 
-export function buildGoogleRequestBody(messagesForApi: ApiMessage[], modelItem: Model, assistant: Assistant) {
-  const systemContent = messagesForApi.find((item) => item.role === "system")?.content;
-  const hasImageOutput = supportsOutputModality(modelItem, "IMAGE");
-  const functionTools = supportsAbility(modelItem, "TOOL")
-    ? conversationFunctionTools(assistant, modelItem)
-    : [];
+/** Google generateContent 的 tools 数组:内置工具优先(目前与函数工具互斥,镜像安卓
+ *  buildCompletionRequestBody:446-468),否则函数声明。导出给 S9 工具发现行的轮边界
+ *  刷新复用,保证首轮与刷新同源。 */
+export function googleToolsFromFunctionTools(
+  functionTools: any[],
+  modelItem: Model,
+): Record<string, JsonValue>[] | undefined {
   const functionDeclarations = googleFunctionDeclarations(functionTools);
-  // 内置工具（googleSearch/urlContext）目前与函数工具互斥，优先内置工具，镜像安卓
-  // buildCompletionRequestBody:446-468（model.tools 覆盖 functionDeclarations）。
   const builtInTools: Record<string, JsonValue>[] = [];
   if (hasBuiltInTool(modelItem, "search")) builtInTools.push({ googleSearch: {} });
   if (hasBuiltInTool(modelItem, "url_context") || hasBuiltInTool(modelItem, "urlContext")) {
     builtInTools.push({ urlContext: {} });
   }
-  const tools = builtInTools.length
+  return builtInTools.length
     ? builtInTools
     : functionDeclarations.length
       ? [{ functionDeclarations }]
       : undefined;
+}
+
+export function buildGoogleRequestBody(
+  messagesForApi: ApiMessage[],
+  modelItem: Model,
+  assistant: Assistant,
+  /** S9:会话 id 让工具发现行按激活集裁剪 MCP 声明;缺省 = 不裁剪(旧行为)。 */
+  conversationId?: string | null,
+) {
+  const systemContent = messagesForApi.find((item) => item.role === "system")?.content;
+  const hasImageOutput = supportsOutputModality(modelItem, "IMAGE");
+  const functionTools = supportsAbility(modelItem, "TOOL")
+    ? conversationToolsWithDiscovery(assistant, modelItem, conversationId)
+    : [];
+  const tools = googleToolsFromFunctionTools(functionTools, modelItem);
   const body: Record<string, JsonValue> = {
     // system 在图片输出模型上不发送，对齐安卓 buildCompletionRequestBody:352。
     ...(systemContent && !hasImageOutput
@@ -115,6 +129,9 @@ export function conversationTransformedMessages(
       ? renderTemplate(effectiveSystemPrompt, templateVariables("", "system", assistant, picked.model))
       : "",
     buildSkillsContext(assistant),
+    // S9:工具发现行的目录段(开关关闭 / 无 MCP 工具 → 空串,提示词逐字不变)。
+    // 内容只随激活集变化:同一激活集下每轮稳定,不破坏前缀缓存。
+    toolDiscoverySystemContext(assistant, conversation.id),
     buildSearchContext(),
     ...frozenContextBlocks(assistant, conversation.id),
   ].filter(Boolean);

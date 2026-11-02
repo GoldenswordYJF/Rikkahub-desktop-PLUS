@@ -39,6 +39,10 @@ beforeAll(async () => {
     { content: "重放用例响应" },
     // P9 合成行灌注用例剧本(第 5 次上游请求)。
     { content: "P9 灌注回答" },
+    // S3 判定表用例剧本:halt 一轮;inject 后重采样一轮(第 6–8 次上游请求)。
+    { content: "S3 halt 回答" },
+    { content: "S3 注入前回答" },
+    { content: "S3 注入后回答" },
   ]);
   cwd = mkdtempSync(join(tmpdir(), "pi-runner-cwd-"));
 });
@@ -193,5 +197,34 @@ describe("pi runner 集成(P7 统一会话数据)", () => {
     expect(serialized).not.toContain("P9 未灌注的旧内容");
     // 合成行不污染退化诊断(legacy 是其设计路径,非编辑痕迹)。
     expect(result.degradedMessageIds).toEqual([asst2.id]);
+  }, 20_000);
+
+  test("S3 判定表:最终轮 halt → 中止会话并以 AgentLoopHaltError 交给协调器", async () => {
+    const { ctx } = testContext("conv-runner-s3-halt", "宣告完成", {
+      onFinalCandidate: () => ({ action: "halt", status: "stalled", reason: "计划未了结" }),
+    });
+    await expect(runPiGeneration(ctx)).rejects.toMatchObject({
+      name: "AgentLoopHaltError",
+      status: "stalled",
+      reason: "计划未了结",
+    });
+  }, 20_000);
+
+  test("S3 判定表:最终轮 inject 经 session.steer 注入,引擎继续采样一轮", async () => {
+    const requestsBefore = server.requests.length;
+    let finals = 0;
+    const { ctx } = testContext("conv-runner-s3-inject", "宣告完成", {
+      onFinalCandidate: () => {
+        finals += 1;
+        return finals === 1 ? { action: "inject", text: "plan not complete" } : { action: "continue" };
+      },
+    });
+    const result = await runPiGeneration(ctx);
+    expect(finals).toBe(2);
+    expect(result.text).toContain("S3 注入前回答");
+    expect(result.text).toContain("S3 注入后回答");
+    // 两条上游请求:注入提示作为 user turn 进入第二次请求体。
+    const injected = server.requests[requestsBefore + 1] as { messages?: Array<{ role: string; content?: unknown }> };
+    expect(JSON.stringify(injected.messages ?? [])).toContain("plan not complete");
   }, 20_000);
 });

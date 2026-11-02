@@ -153,4 +153,25 @@ describe("withRetry", () => {
       { attempt: 3, status: 503 },
     ]);
   });
+
+  test("delayFor 覆盖退避时长;返回 null = 放弃重试并抛出当前错误", async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    await expect(
+      withRetry(
+        () => {
+          calls += 1;
+          return Promise.reject(new RetryableHttpError("rate", 429));
+        },
+        {
+          maxAttempts: 3,
+          baseDelayMs: 5_000,
+          delayFor: ({ failedAttempt }) => (failedAttempt === 1 ? 0 : null),
+          onRetry: ({ delayMs }) => delays.push(delayMs),
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 429 });
+    expect(calls).toBe(2); // 第一次重试后仍失败；第二次要求等待被判放弃
+    expect(delays).toEqual([0]); // 放弃时不再报 onRetry
+  });
 });

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { basename, join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { dataDir, statePath } from "../foundation/paths";
+import { collectDeclaredWritableDirs } from "../workspace/writable-dirs";
 import { reportError } from "../observability/app-errors";
 import type { State } from "../foundation/types";
 
@@ -45,6 +46,20 @@ export function peekSandboxRestricted(): boolean {
     return parsed.settings?.sandboxRestricted === true;
   } catch {
     return false;
+  }
+}
+
+/** S2b 受限沙盒:额外可写目录同样要在 dataDir 锁之前读到(启动编排阶段标注)。
+ *  来源是全局 sandboxExtraWritableDirs + 各 stdio MCP 服务器的 sandboxWritableDirs;
+ *  规范化与危险根目录拦截由 workspace/writable-dirs.ts 单源负责。失败一律按空处理——
+ *  读不到声明最多让某个服务器继续写不进去,绝不能因此不启动。 */
+export function peekSandboxExtraWritableDirs(): string[] {
+  try {
+    if (!existsSync(statePath)) return [];
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as { settings?: unknown };
+    return collectDeclaredWritableDirs(parsed.settings);
+  } catch {
+    return [];
   }
 }
 

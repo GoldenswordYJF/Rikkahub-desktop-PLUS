@@ -24,6 +24,7 @@ const { runPiGeneration } = await import("./runner");
 const { model, provider } = await import("../model-providers");
 const { startFakeOpenAiSse } = await import("../test-utils/fake-openai-sse");
 
+import type { ToolDefinition } from "../../pi/packages/coding-agent/src/core/extensions/types.ts";
 import type { GenerationEvent } from "../inference-engine/events";
 import type { FakeOpenAiSseServer, FakeSseTurn } from "../test-utils/fake-openai-sse";
 
@@ -211,6 +212,74 @@ describe("pi runner × customTools 集成", () => {
     expect(final).toContain("first");
     expect(final).toContain("second");
     expect(final).toContain("\"exitCode\":0");
+  }, 30_000);
+
+  test("S10 工具发现:首轮不带未激活 MCP schema,search_tools 命中后轮边界激活,下一轮可调用", async () => {
+    const { conversation } = bindWorkspaceConversation();
+    const cwd = workspaceRuntimeForConversation(conversation as never)!.cwd;
+    const { assemblePiToolDiscovery } = await import("./tool-discovery");
+    const echoCalls: string[] = [];
+    const resident: ToolDefinition = {
+      name: "resident_probe",
+      label: "resident_probe",
+      description: "Resident tool",
+      parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
+      executionMode: "sequential",
+      async execute() {
+        return { content: [{ type: "text", text: "resident-ok" }], details: {} };
+      },
+    };
+    const mcpEcho: ToolDefinition = {
+      name: "mcp__fake__echo",
+      label: "mcp__fake__echo",
+      description: "Echo a value",
+      parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
+      executionMode: "sequential",
+      async execute() {
+        echoCalls.push("echo");
+        return { content: [{ type: "text", text: "ECHO-OK" }], details: {} };
+      },
+    };
+    const discovery = assemblePiToolDiscovery(
+      [resident, mcpEcho],
+      { ...(fakeAssistant as Record<string, unknown>), enableToolDiscovery: true } as never,
+      conversation.id,
+    );
+    expect(discovery.initialActiveNames).toEqual(["resident_probe", "search_tools"]);
+    const server = await startFakeOpenAiSse([
+      { toolCalls: [{ id: "tc-search", name: "search_tools", arguments: JSON.stringify({ query: "echo" }) }] },
+      { toolCalls: [{ id: "tc-echo", name: "mcp__fake__echo", arguments: "{}" }] },
+      { content: "完成" },
+    ]);
+    servers.push(server);
+    const events: GenerationEvent[] = [];
+    const sink = (event: GenerationEvent) => void events.push(event);
+    const result = await runPiGeneration({
+      provider: provider({ id: crypto.randomUUID(), name: "S10 Provider", baseUrl: server.baseUrl, apiKey: "sk-test" }),
+      model: model("fake-model", "S10 Model"),
+      conversationId: conversation.id,
+      cwd,
+      history: [],
+      promptText: "找工具",
+      tools: discovery.tools,
+      activeToolNames: discovery.initialActiveNames!,
+      onToolActivationBoundary: discovery.refreshActiveNames,
+      sink,
+    });
+    expect(result.text).toBe("完成");
+    expect(server.requests.length).toBe(3);
+    // 请求体 tools 数组的硬证据:首轮只有常驻面;search_tools 命中经 turn_end 提升后,
+    // 第二轮请求才携带 MCP schema(pi 原生 setActiveToolsByName 的"下一轮生效")。
+    const toolNames = (index: number) =>
+      ((server.requests[index]!.tools ?? []) as Array<{ function?: { name?: string } }>).map(
+        (entry) => entry.function?.name,
+      );
+    expect(toolNames(0)).toEqual(["resident_probe", "search_tools"]);
+    expect(toolNames(1)).toEqual(["resident_probe", "search_tools", "mcp__fake__echo"]);
+    expect(toolNames(2)).toContain("mcp__fake__echo");
+    expect(echoCalls).toEqual(["echo"]);
+    // 工具结果回灌模型(循环闭合):第二轮请求带 ECHO-OK。
+    expect(JSON.stringify(server.requests[2])).toContain("ECHO-OK");
   }, 30_000);
 
   test("等待审批中停止生成:prompt 正常返回(非 error 抛出),等待者零泄漏", async () => {

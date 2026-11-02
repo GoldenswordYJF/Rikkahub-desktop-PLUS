@@ -24,6 +24,8 @@ import type { GenerationEventSink, GenerationTarget } from "../inference-engine/
 import type { SubagentChildOutcome, SubagentChildRequest, SubagentChildRunner, SubagentPathLock } from "../tools/subagent";
 import { isToolAllowedForSubagent, runSubagentDispatch, type SubagentDispatchInput } from "../tools/subagent";
 import { openAiSubagentTool } from "../tools/definitions";
+import { readToolActivation } from "../conversations/tool-activation";
+import { isToolDiscoveryEnabled } from "../tools/discovery-store";
 import { findModelStrict } from "../model-providers";
 import type { PiModelLimits } from "./model-bridge";
 import { createPiSessionResources } from "./resources";
@@ -167,6 +169,15 @@ function buildChildTools(
   writeLock: SubagentPathLock,
 ): ToolDefinition[] {
   const allowed = settings.allowedTools;
+  // S10:子面不继承父激活数组,而是每次重新装配 allowedTools ∩ 父激活集。
+  // MCP 工具不在白名单 → 现状恒被排除;显式交集防白名单未来扩容时,子智能体
+  // 拿到父会话尚未激活(模型根本没发现过)的 MCP 工具。
+  const parentActive = isToolDiscoveryEnabled(ctx.assistant)
+    ? new Set(readToolActivation(ctx.conversation.id).active)
+    : null;
+  const keep = (tool: ToolDefinition): boolean =>
+    isToolAllowedForSubagent(tool.name, allowed)
+    && (!parentActive || !tool.name.startsWith("mcp__") || parentActive.has(tool.name));
   const workspace = ctx.includeWorkspaceTools === false
     ? []
     : createPiWorkspaceTools({
@@ -174,7 +185,7 @@ function buildChildTools(
         assistant: ctx.assistant,
         sink,
         approvalScopeId,
-      }).filter((tool) => isToolAllowedForSubagent(tool.name, allowed));
+      }).filter(keep);
   const general = createPiGeneralTools({
     conversation: ctx.conversation,
     assistant: ctx.assistant,
@@ -182,7 +193,7 @@ function buildChildTools(
     ...(ctx.target ? { target: ctx.target } : {}),
     model,
     approvalScopeId,
-  }).filter((tool) => isToolAllowedForSubagent(tool.name, allowed));
+  }).filter(keep);
   return [...workspace, ...general].map((tool) => withWriteLock(tool, writeLock, ctx.cwd));
 }
 

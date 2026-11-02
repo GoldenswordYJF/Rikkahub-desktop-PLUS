@@ -5,8 +5,10 @@ import { formatKeyLocal, getStringArray, isRecord } from "../foundation/utils";
 import type { Assistant, JsonValue, MemorySettings } from "../foundation/types";
 import type { SubagentConfig } from "../foundation/types/settings/subagent-config";
 import { isMcpToolEnabledForAssistant } from "./approval";
+import { capMcpToolDescription } from "./mcp-description";
 import { listSkills } from "./skills";
 import { ASK_USER_TOOL_DESCRIPTION, ASK_USER_TOOL_NAME, askUserQuestionsSchema } from "./ask-user";
+import { PLAN_TOOL_NAME, planToolDescription, planToolParameters } from "./plan";
 import { inlineMcpToolSchema } from "./schema-inline";
 import { canAssistantWriteMemory } from "../memory/write-policy";
 
@@ -228,7 +230,14 @@ Do not mention to the user that you are saving a memory.`,
   return tools;
 }
 
-export function openAiMcpTools(assistant: Assistant, mcpServers: JsonValue[]) {
+export function openAiMcpTools(
+  assistant: Assistant,
+  mcpServers: JsonValue[],
+  options?: {
+    /** S8:超长 description 截断并保留关键说明;关闭(默认)时逐字透传。 */
+    descriptionCap?: boolean;
+  },
+) {
   const selected = new Set(getStringArray(assistant.mcpServers));
   return (mcpServers as Array<Record<string, JsonValue>>)
     .filter((server) => selected.has(String(server.id ?? "")) && isRecord(server.commonOptions) && server.commonOptions.enable !== false)
@@ -244,19 +253,24 @@ export function openAiMcpTools(assistant: Assistant, mcpServers: JsonValue[]) {
       // an entire server from the model.
       return tools.filter(isRecord)
         .filter((tool) => isMcpToolEnabledForAssistant(assistant, serverId, tool))
-        .map((tool) => ({
-          type: "function" as const,
-          function: {
-            name: `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}`,
-            description: String(tool.description ?? `MCP tool from ${serverName}`),
-            // $ref 内联展开(安卓 cf79246b 同款):Google 原生路不认悬空引用,整条请求
-            // 400;展开在声明单源处做,聊天引擎三家协议与 pi 引擎同源继承。无 $ref 时
-            // 原对象透传(零拷贝)。
-            parameters: tool.inputSchema && typeof tool.inputSchema === "object"
-              ? inlineMcpToolSchema(tool.inputSchema)
-              : { type: "object", properties: {} },
-          },
-        })).filter((tool) => tool.function.name !== "mcp__");
+        .map((tool) => {
+          const rawDescription = String(tool.description ?? `MCP tool from ${serverName}`);
+          return {
+            type: "function" as const,
+            function: {
+              name: `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+              // S8:超长说明保留开头摘要与 IMPORTANT/NOTE/Always/Never 等关键句;
+              // 未超限或开关关闭时与历史逐字一致。
+              description: options?.descriptionCap ? capMcpToolDescription(rawDescription).text : rawDescription,
+              // $ref 内联展开(安卓 cf79246b 同款):Google 原生路不认悬空引用,整条请求
+              // 400;展开在声明单源处做,聊天引擎三家协议与 pi 引擎同源继承。无 $ref 时
+              // 原对象透传(零拷贝)。
+              parameters: tool.inputSchema && typeof tool.inputSchema === "object"
+                ? inlineMcpToolSchema(tool.inputSchema)
+                : { type: "object", properties: {} },
+            },
+          };
+        }).filter((tool) => tool.function.name !== "mcp__");
     });
 }
 
@@ -298,6 +312,22 @@ Optional model_id picks the model for a task (e.g. a cheaper model for simple su
           },
           required: ["mode", "tasks"],
         },
+      },
+    },
+  ];
+}
+
+/** update_plan 声明(PC 专属,默认开):与 subagent 同一门控语义——开关关闭直接返回
+ *  空数组,模型面看不到这个工具,历史里的计划 part 仍能照常渲染(面板读消息流,不读声明)。 */
+export function openAiPlanTool(enabled: boolean, v2 = false) {
+  if (!enabled) return [];
+  return [
+    {
+      type: "function" as const,
+      function: {
+        name: PLAN_TOOL_NAME,
+        description: planToolDescription(v2),
+        parameters: planToolParameters(v2),
       },
     },
   ];

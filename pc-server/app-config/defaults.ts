@@ -4,7 +4,9 @@
 import type { State } from "../foundation/types";
 import type { Settings } from "../foundation/types/settings";
 import { defaultImAccess } from "../foundation/types/settings/im-access";
+import { defaultAgentLoopConfig } from "../foundation/types/settings/agent-loop-config";
 import { defaultSubagentConfig } from "../foundation/types/settings/subagent-config";
+import { defaultWorkspaceToolsConfig } from "../foundation/types/settings/workspace-tools-config";
 import { id } from "../foundation/utils";
 import { RUNNING_IN_CONTAINER } from "../foundation/platform";
 import { DEFAULT_AUTO_MODEL_ID, defaultProviders } from "../model-providers";
@@ -79,6 +81,15 @@ export function defaultSettings(): Settings {
       // 一键折叠工作步骤:开=思考链卡默认只留一行「展开 N 条工作步骤」,流式中仍露最新
       // 一条(进度可见)。PC-only 显示项,导出安卓前剥离;用户手动展开过的卡不受影响。
       collapseAllSteps: false,
+      // 工具调用折成一行(Claude Code 式 trace):开=每个工具步骤默认只占一行(参数摘要 +
+      // 状态徽标同行,点开才出预览)。默认开;关掉即回到旧的「每步都带内联预览」形态。
+      // PC-only 显示项,导出安卓前剥离。
+      toolTraceCompact: true,
+      // 计划面板。开=向模型挂 update_plan 工具(多步任务时它会先发布一份步骤清单,随进度
+      // 整份更新),右侧工作台把最后一条渲染成可跟随的 TODO 面板;标题行的清单入口只在真的
+      // 出现过计划后才出现。默认开——与 toolTraceCompact 同为「不写即开」的常规显示项。
+      // 关掉只是不再向模型声明这个工具,历史里已写下的计划照常可读。PC-only,导出安卓前剥离。
+      planPanel: true,
       fontSizeRatio: 1,
       // 界面字号缩放(建议 0.85–1.20)。null = 不缩放,根字号保持浏览器默认 16px。PC-only,
       // 已在 pcOnlyDisplayFields 清单里,导出备份时剥离,Android 不可见。
@@ -96,6 +107,17 @@ export function defaultSettings(): Settings {
       // User-resizable chat input height in px (null = default min). Persisted across
       // restarts via displaySetting. PC-only — stripped before syncing to Android.
       chatInputHeight: null,
+      // 实验：输入框旁的桌面伴侣（PC-only，导出安卓时剥离）。默认关闭，开启后只在
+      // 足够宽的窗格左侧出现，不改变输入框布局。
+      showCompanion: false,
+      // 帕秋莉已下线（像素形象不好看），只留大肥鱼一只。老 state.json 里残留的
+      // "patchouli" 由前端 normalizeCompanionSkin 兜回这里，不做数据迁移。
+      companionSkin: "deepy",
+      companionBubbles: true,
+      // 像素图只能整数倍放大(2=标准),位移是相对默认锚点(输入列左下)的像素增量,
+      // 老 state 缺这两个字段时前端各自回落到 2 与 {0,0}。
+      companionScale: 2,
+      companionPos: { x: 0, y: 0 },
     },
     enableWebSearch: false,
     favoriteModels: [],
@@ -116,6 +138,8 @@ export function defaultSettings(): Settings {
     // 子智能体(PC-only):默认关。开关/并发/任务上限/token 预算/子面工具,见
     // foundation/types/settings/subagent-config.ts(区间校验与默认值单源)。
     subagent: defaultSubagentConfig(),
+    // 工作区工具面契约(PC-only):默认全关,关闭时 read/edit 输出与历史逐字一致。
+    workspaceTools: defaultWorkspaceToolsConfig(),
     promptOptimizeModelId: "",
     // 全局嵌入 / 重排场景档:默认未配置(空串),由用户在「设置 › 模型 › 场景模型」里
     // 从已添加的 EMBEDDING / RERANK 模型中选。两者都是「报错档」语义:没选 = 相关功能不可用。
@@ -256,6 +280,8 @@ export function defaultSettings(): Settings {
     // 受限沙盒默认关(S2b):开启即"agent 只能写工作区与数据目录,其余位置只读"——
     // 重启时经 workspace/restricted-launch.ts 标注目录并降级自重启,改动才会生效。
     sandboxRestricted: false,
+    // 额外可写目录(全局):受限档下给技能工具等声明的沙盒例外;空 = 只有数据目录与工作区可写。
+    sandboxExtraWritableDirs: [],
     workspaceLastPermissionPreset: null,
     shellPath: "",
     keybindings: {
@@ -284,6 +310,8 @@ export function defaultSettings(): Settings {
     memoryExperimentSettings: { ...DEFAULT_MEMORY_EXPERIMENT_SETTINGS },
     // 实验：心情状态。默认全关 + dry-run，关闭时不判定、不调模型、不写库。
     moodExperimentSettings: { ...DEFAULT_MOOD_EXPERIMENT_SETTINGS },
+    // 实验：自主循环。默认关闭，关闭时运行记录/判定/重试全部不生效(零行为差)。
+    agentLoop: defaultAgentLoopConfig(),
   };
 }
 

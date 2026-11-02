@@ -13,17 +13,30 @@
 //   · R3-1 头超时 + signal 桥接由骨架统一(headerTimeoutMs),Claude/Google 不再裸奔;
 //   · R3-4 工具执行 for 循环每迭代查 signal.aborted,三家一致(删除 abortCheckAfterRead
 //     冻结点——此前 Claude/Google 停止后本轮工具仍会执行,违背用户"停止"心智)。
+// S4(自主循环)在轮边界加了"零可见输出"传输重试:fetch 失败 / !ok(408·429·5xx)
+// 在尚未执行任何工具、且本轮尚未读流时按 1s→2s 退避重试,最多 3 次尝试;尊重
+// Retry-After;不占 256 轮预算。开关经 hooks.transportRetry 注入(false/缺省 = 旧行为)。
 // 其余仍为纯参数化差异(文案/编码格式等),不做无谓统一。
 import type { Assistant, Message, Provider } from "../foundation/types";
 import { initialApprovalState } from "../tools/approval";
 import { toolExecutionErrorPayload } from "../tools/format";
 import { finishReasoningParts } from "./parts";
-import type { StreamHooksWithSink, ToolCall, ToolDispatchContext, ToolResult } from "./events";
+import type { LoopDecision, StreamHooksWithSink, ToolCall, ToolDispatchContext, ToolResult } from "./events";
 import type { ToolOutputEntry, ToolPart } from "../foundation/types";
 import { jsonBody, textBody } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
 import { isRecord } from "../foundation/utils";
+import { withRetry } from "../foundation/retry";
+import { buildToolObservation } from "../agent-loop/controller";
+import { AgentLoopHaltError } from "../agent-loop/halt";
+import {
+  parseRetryAfterMs,
+  TRANSPORT_RETRY_BASE_DELAY_MS,
+  TRANSPORT_RETRY_MAX_ATTEMPTS,
+  TransportHttpError,
+  transportRetryDelayMs,
+} from "./transport-retry";
 
 // 专题11-P1-3:usage 合并语义对齐安卓 Usage.merge——新值>0 才覆盖,否则保留旧值。
 // 流式/多轮场景里,后到的 usage 事件缺某字段(如 Google 末尾 chunk 不带
@@ -90,6 +103,10 @@ async function fetchRoundWithHeaderTimeout(
   return adapter.fetchRound(requestBody, round, controller.signal, nonStream).finally(cleanup);
 }
 
+function isAbortErrorLike(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
   if (!hooks?.conversation) return undefined;
   return {
@@ -140,6 +157,9 @@ export interface ProviderRoundAdapter {
   readRound(response: Response, signal: AbortSignal | undefined, nonStream?: boolean): Promise<RoundResult>;
   /** 编码下一轮请求 body：回放本轮 assistant 轮 + 工具结果轮（provider 特定格式）。 */
   encodeNextTurn(result: RoundResult, toolResults: ExecutedToolResult[]): Record<string, unknown>;
+  /** S9:轮边界刷新工具数组(可选)。骨架在 encodeNextTurn 之后调用,返回 undefined
+   *  = 沿用原 body。实现只在有工具新激活时返回新 body——无变化时请求体逐字不变。 */
+  refreshTools?(body: Record<string, unknown>): Record<string, unknown> | undefined;
   /** 成功轮的响应日志载荷。 */
   logResponseBody(result: RoundResult): string;
   /** 文本累积是否用换行分隔（Claude/Google: true；OpenAI: false 直接拼接）。 */
@@ -211,6 +231,18 @@ export async function runStreamingToolLoop(
   // 专题9:助手"流式输出"关闭 → 从第一轮起就按非流式请求(工具循环的每一轮都非流式)。
   // 用户显式选择时 nonStreamFallback 的降级重试不再适用(已经是非流式,降无可降)。
   const userNonStream = assistant.streamOutput === false && adapter.makeNonStreamBody != null;
+  // S4:是否已有工具真正执行过。传输重试只允许在"本次生成还没跑过任何工具"时发生
+  // (plan §3.4 禁止"已执行过副作用工具之后");保守按任意工具计,不区分只读/写。
+  let toolsExecuted = false;
+
+  // S9 工具发现行:轮边界统一出口。先 encodeNextTurn 回放本轮,再尝试刷新工具
+  // 数组(有新激活工具时协调器返回新 body)。刷新发生在「工具结果已回放、下一轮
+  // fetch 前」,与 steering 排水同一位点——本轮请求体在工具执行前已定稿,绝不中途改写。
+  const encodeNextBody = (result: RoundResult, toolResults: ExecutedToolResult[]): Record<string, unknown> => {
+    const next = adapter.encodeNextTurn(result, toolResults);
+    const refreshed = adapter.refreshTools?.(next);
+    return refreshed ?? next;
+  };
 
   // steering 轮边界(用户问题②,对齐 Codex「Pending input is drained into history before
   // building the next model request」):把本轮回放进请求体后,向协调器要「生成中补发」的
@@ -222,7 +254,7 @@ export async function runStreamingToolLoop(
     if (!adapter.appendSteeringUserTurns) return false;
     const steerTexts = hooks.onSteerBoundary?.() ?? [];
     if (steerTexts.length === 0) return false;
-    currentBody = adapter.appendSteeringUserTurns(adapter.encodeNextTurn(result, toolResults), steerTexts);
+    currentBody = adapter.appendSteeringUserTurns(encodeNextBody(result, toolResults), steerTexts);
     allContent = "";
     generationMs = 0;
     return true;
@@ -230,6 +262,8 @@ export async function runStreamingToolLoop(
 
   for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
+    // 自主循环(S1):轮边界观察点(不发请求前的最后一刻)。开关关闭时回调缺省,零行为差。
+    hooks.onRunBoundary?.(round + 1);
     const roundStarted = Date.now();
     const nonStreamRound = userNonStream || (forceNonStream && adapter.nonStreamFallback != null);
     const requestBody = userNonStream
@@ -238,12 +272,88 @@ export async function runStreamingToolLoop(
         ? adapter.nonStreamFallback.makeBody(currentBody)
         : currentBody;
 
+    // S4:传输重试。只在「本轮尚未读流 → 尚无任何可见输出」且「还没执行过工具」的窗口
+    // 生效——读流后的中断走既有 nonStreamFallback,绝不因已输出的半截内容再采样一次。
+    // 重试不推进 round(不占 256 轮预算);状态条经 engine_status 显示第几次/共几次,
+    // 运行记录由协调器同一通道落 retry 流水。
+    const transportRetry = hooks.transportRetry === true && !toolsExecuted && !forceNonStream;
+    let retriedThisRound = false;
+    const clearRetryStatus = () => {
+      if (retriedThisRound) hooks.sink?.({ kind: "engine_status", status: { busy: false } });
+    };
     let response: Response;
     try {
-      response = await fetchRoundWithHeaderTimeout(adapter, requestBody, round, signal, nonStreamRound);
+      response = await withRetry(
+        async () => {
+          let candidate: Response;
+          try {
+            candidate = await fetchRoundWithHeaderTimeout(adapter, requestBody, round, signal, nonStreamRound);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            logRound(adapter, round, roundStarted, requestBody, { ok: false, status: 0, responseBody: "", error: detail });
+            // 用户停止立即原样抛(外部 signal 已中止)。响应头超时是内部 controller 的
+            // abort——若运行时以 AbortError 呈现,转普通 Error 让 withRetry 能按传输失败
+            // 重试;未开启重试时保持原对象(旧行为)。
+            if (transportRetry && !signal?.aborted && isAbortErrorLike(err)) {
+              throw new Error(detail || `响应头超时:${adapter.providerItem.name}`);
+            }
+            throw err;
+          }
+          if (candidate.ok) return candidate;
+          const text = await candidate.text();
+          logRound(adapter, round, roundStarted, requestBody, {
+            ok: false,
+            status: candidate.status,
+            responseHeaders: Object.fromEntries(candidate.headers.entries()),
+            responseBody: textBody(text),
+            error: textBody(text),
+          });
+          // 文案与引入前逐字一致(`${provider} ${status}: ${前500字}`);重试判定所需
+          // 的状态码/Retry-After 挂在错误对象上。
+          throw new TransportHttpError(
+            `${adapter.providerItem.name} ${candidate.status}: ${text.slice(0, 500)}`,
+            candidate.status,
+            parseRetryAfterMs(candidate.headers.get("retry-after")),
+            text,
+          );
+        },
+        {
+          maxAttempts: transportRetry ? TRANSPORT_RETRY_MAX_ATTEMPTS : 1,
+          baseDelayMs: TRANSPORT_RETRY_BASE_DELAY_MS,
+          signal,
+          shouldRetry: (err) => {
+            if (signal?.aborted) return false;
+            if (err instanceof TransportHttpError) return err.retryable;
+            // 网络瞬断 / 响应头超时(用户停止已在上面排除)。AbortError 由 withRetry
+            // 自身按"主动中止"原样抛,不会走到这里。
+            return true;
+          },
+          delayFor: ({ failedAttempt, baseDelayMs, error }) =>
+            error instanceof TransportHttpError
+              ? transportRetryDelayMs(failedAttempt, error.retryAfterMs)
+              : baseDelayMs * 2 ** Math.max(0, failedAttempt - 1),
+          onRetry: ({ attempt }) => {
+            retriedThisRound = true;
+            hooks.sink?.({
+              kind: "engine_status",
+              status: {
+                busy: true,
+                phase: "retrying",
+                attempt,
+                maxAttempts: TRANSPORT_RETRY_MAX_ATTEMPTS,
+                startedAt: Date.now(),
+              },
+            });
+          },
+        },
+      );
+      clearRetryStatus();
     } catch (err) {
+      clearRetryStatus();
+      // 非 2xx 的终局(不可重试 / 重试耗尽)文案与引入前逐字一致,不转非流式降级:
+      // 旧行为对 !ok 本来就是直接抛,降级只服务 fetch/读流异常。
+      if (err instanceof TransportHttpError) throw err;
       const detail = err instanceof Error ? err.message : String(err);
-      logRound(adapter, round, roundStarted, requestBody, { ok: false, status: 0, responseBody: "", error: detail });
       if (adapter.nonStreamFallback && !forceNonStream && !userNonStream && !signal?.aborted) {
         forceNonStream = true;
         hooks.sink?.({ kind: "reasoning_delta", text: `${adapter.nonStreamFallback.connectHint} ${detail}` });
@@ -251,18 +361,6 @@ export async function runStreamingToolLoop(
         continue;
       }
       throw err;
-    }
-
-    if (!response.ok) {
-      const text = await response.text();
-      logRound(adapter, round, roundStarted, requestBody, {
-        ok: false,
-        status: response.status,
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-        responseBody: textBody(text),
-        error: textBody(text),
-      });
-      throw new Error(`${adapter.providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
     }
 
     let result: RoundResult;
@@ -329,6 +427,16 @@ export async function runStreamingToolLoop(
         round -= 1; // 用户插话触发的再采样不占工具轮预算(预算防的是模型失控循环)
         continue;
       }
+      // 自主循环(S3):完成校验。计划未了结/缺证据 → 注入提示重采样一次;同一份未了结
+      // 指纹再来一次 → 停滞终局。无计划或旧形状计划不拦截(开关打开也不能卡死旧会话)。
+      const finalDecision: LoopDecision = hooks.onFinalCandidate?.() ?? { action: "continue" };
+      if (finalDecision.action === "halt") {
+        throw new AgentLoopHaltError(finalDecision.status, finalDecision.reason);
+      }
+      if (finalDecision.action === "inject" && adapter.appendSteeringUserTurns) {
+        currentBody = adapter.appendSteeringUserTurns(encodeNextBody(result, []), [finalDecision.text]);
+        continue;
+      }
       return allContent.trim() || "(empty response)";
     }
 
@@ -337,7 +445,13 @@ export async function runStreamingToolLoop(
     // balanced 档依赖参数：危险命令/区外写入才审批）。generateAnswer 看到
     // hasPendingToolApproval 会暂停等用户决定。
     const approvalByCall = new Map(
-      result.toolCalls.map((call) => [call.id, initialApprovalState(call.name, assistant, hooks.conversation, call.arguments)] as const),
+      result.toolCalls.map((call) => [
+        call.id,
+        initialApprovalState(call.name, assistant, hooks.conversation, call.arguments, {
+          toolCallId: call.id,
+          ...(hooks.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+        }),
+      ] as const),
     );
     const hasPendingInBatch = [...approvalByCall.values()].some((state) => state.type === "pending");
     // 流内建卡的 provider（Claude）在参数未到时用无参数下界建卡；终局若上调为
@@ -375,7 +489,12 @@ export async function runStreamingToolLoop(
           input: call.arguments,
           output: [],
           // 循环层建卡时参数已齐，直接用终局审批态（含缘由）
-          approvalState: approvalByCall.get(call.id) ?? initialApprovalState(call.name, assistant, hooks.conversation, call.arguments),
+          approvalState:
+            approvalByCall.get(call.id) ??
+            initialApprovalState(call.name, assistant, hooks.conversation, call.arguments, {
+              toolCallId: call.id,
+              ...(hooks.observeToolBoundary ? { observer: hooks.observeToolBoundary } : {}),
+            }),
         };
         finishReasoningParts(hooks.message);
         hooks.sink?.({
@@ -414,12 +533,37 @@ export async function runStreamingToolLoop(
     if (hasPendingInBatch) {
       return allContent.trim() || "";
     }
+    // S4:本批工具已真正执行 → 之后（下一轮）不再做传输重试。审批 pending 的批整批
+    // 未执行且已收尾，不置位。
+    toolsExecuted = true;
 
+    // 自主循环(S3):工具批执行完的判定表。停滞/同错都是确定性规则,halt 优先于任何注入。
+    const observations = toolResults.map((item) => buildToolObservation(item.call, item.output));
+    const roundDecision: LoopDecision = hooks.onToolRoundEnd?.(observations) ?? { action: "continue" };
+    if (roundDecision.action === "halt") {
+      throw new AgentLoopHaltError(roundDecision.status, roundDecision.reason);
+    }
     // 工具轮边界:注入发生在本轮所有工具结果之后——与 Codex 的 pending_input 排水位
     // (assistant 轮回放 + 工具结果 + 用户补发)逐字对齐。无注入时照常编码下一轮。
-    if (!absorbSteering(result, toolResults)) currentBody = adapter.encodeNextTurn(result, toolResults);
+    // 判定表提示与用户补发同一批注入;只有用户补发触发分段(清正文/耗时口径)。
+    const steerTexts = adapter.appendSteeringUserTurns ? (hooks.onSteerBoundary?.() ?? []) : [];
+    const injections = [...steerTexts, ...(roundDecision.action === "inject" ? [roundDecision.text] : [])];
+    if (injections.length > 0 && adapter.appendSteeringUserTurns) {
+      currentBody = adapter.appendSteeringUserTurns(encodeNextBody(result, toolResults), injections);
+      if (steerTexts.length > 0) {
+        allContent = "";
+        generationMs = 0;
+      }
+    } else {
+      currentBody = encodeNextBody(result, toolResults);
+    }
   }
 
+  // 自主循环(S3):判定表开启时轮次耗尽也是"需要人处理"的终局,不再当普通异常抛。
+  // 关闭时不传 onFinalCandidate,hooks 缺省 → 与引入前逐字一致。
+  if (hooks.onFinalCandidate) {
+    throw new AgentLoopHaltError("exhausted", adapter.exhaustedError);
+  }
   throw new Error(adapter.exhaustedError);
 }
 

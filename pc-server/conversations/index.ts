@@ -14,6 +14,7 @@ import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount,
 import { reportError } from "../observability/app-errors";
 import { collectPcFileRefs } from "../backup/file-refs";
 import { ensureMemoryTables } from "../memory/sqlite";
+import { ensureAgentLoopTables } from "../agent-loop/schema";
 
 export const DEFAULT_ASSISTANT_ID = "0950e2dc-9bd5-4801-afa3-aa887aa36b4e";
 
@@ -73,7 +74,8 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
       lorebook_ids       TEXT NOT NULL DEFAULT '[]',
       workspace_id       TEXT,
       workspace_cwd      TEXT,
-      engine_compactions TEXT
+      engine_compactions TEXT,
+      tool_activation    TEXT
     );
     CREATE TABLE IF NOT EXISTS pc_message_node (
       id              TEXT PRIMARY KEY NOT NULL,
@@ -147,8 +149,20 @@ export function ensureConversationEngineCompactionsColumn(db: InstanceType<typeo
   }
 }
 
-function dropTruncateIndexColumnIfPresent(db: InstanceType<typeof Database>): void {
+/** S9:工具发现激活集列(会话级 JSON:{active:[],pending:[]})。可空列旧数据天然兼容
+ *  (NULL = 空激活集);仅存 PC 自有库,跨端导出白名单不含此列。幂等,失败仅告警。 */
+function ensureConversationToolActivationColumn(db: InstanceType<typeof Database>): void {
   try {
+    const cols = db.prepare("PRAGMA table_info(pc_conversation)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "tool_activation")) {
+      db.exec("ALTER TABLE pc_conversation ADD COLUMN tool_activation TEXT");
+    }
+  } catch (err) {
+    console.warn("[conv-db] 会话工具发现激活列迁移失败(该功能暂不可用,下次启动重试)", err);
+  }
+}
+
+function dropTruncateIndexColumnIfPresent(db: InstanceType<typeof Database>): void {  try {
     const cols = db.prepare("PRAGMA table_info(pc_conversation)").all() as { name: string }[];
     if (cols.some((c) => c.name === "truncate_index")) {
       db.exec("ALTER TABLE pc_conversation DROP COLUMN truncate_index");
@@ -174,10 +188,13 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
     ensureConversationTables(db);
     // 记忆与对话同库：结构化表随活库一起建好，启动迁移/运行时写入无需再判库版本。
     ensureMemoryTables(db);
+    // 自主循环运行记录(PC-only 实验)：表恒建(幂等),写入只在设置开关启用后发生。
+    ensureAgentLoopTables(db);
     dropTruncateIndexColumnIfPresent(db);
     ensureConversationInjectionColumns(db);
     ensureConversationWorkspaceColumns(db);
     ensureConversationEngineCompactionsColumn(db);
+    ensureConversationToolActivationColumn(db);
     ensureMessageFtsTable(db);
     // FTS 自愈重建：老库首次升级（表刚建、空）或索引意外丢失时，从节点表全量重建。
     // 幂等：行数>0 时零成本跳过。

@@ -378,4 +378,10 @@ export type EngineStatusEventDto =
       toolCallId?: string;
       toolName?: string;
       summary?: string;
+      /** 自主循环(S1):所属运行 id 与实时计数。旧前端忽略;面板/状态条按需消费。 */
+      runId?: string;
+      round?: number;
+      attempts?: number;
+      replanCount?: number;
+      stallReason?: string;
     };

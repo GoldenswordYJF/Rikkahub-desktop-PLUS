@@ -100,6 +100,7 @@ function pcSentinelSettings(): Settings {
   settings.webServerJwtEnabled = true;
   settings.preferredPort = 18099;
   settings.sandboxRestricted = true;
+  settings.sandboxExtraWritableDirs = ["C:\\pc-sandbox-extra"];
   settings.workspaceLastPermissionPreset = "full_access";
   settings.keybindings = { ...settings.keybindings, newConversation: { keys: ["Ctrl", "Shift", "K"], enabled: false } };
   settings.webPasswordHash = "pc-hash-sentinel";
@@ -135,6 +136,14 @@ function pcSentinelSettings(): Settings {
     maxTasksPerCall: 10,
     tokenBudget: 500_000,
     allowedTools: ["read", "bash"],
+  };
+  settings.agentLoop = {
+    enabled: true,
+    transportRetry: false,
+    maxReplans: 5,
+    stallRepeatLimit: 4,
+    sameErrorLimit: 4,
+    requireVerifiedCompletion: false,
   };
   settings.sshDevices = [{
     id: "pc-ssh-device",
@@ -207,6 +216,7 @@ function androidConflictPayload(): Record<string, unknown> {
     webServerJwtEnabled: false,
     preferredPort: 19999,
     sandboxRestricted: false,
+    sandboxExtraWritableDirs: ["C:\\android-injected-extra"],
     workspaceLastPermissionPreset: "balanced",
     keybindings: {},
     webPasswordHash: "android-injected-hash",
@@ -224,6 +234,7 @@ function androidConflictPayload(): Record<string, unknown> {
     memorySettings: { globalEnabled: true, writeStrategy: "always_global", dedupEnabled: true, memoryModelThinkingEnabled: false },
     memoryVectorSettings: { enabled: false, autoIndex: false, topK: 5, minMemories: 200, expandNeighbors: false, rerankEnabled: false, rerankTopN: 10 },
     subagent: { ...androidDefaults, enabled: false, maxConcurrency: 1, maxTasksPerCall: 1, tokenBudget: 16_000 },
+    agentLoop: { enabled: true, transportRetry: true, maxReplans: 9, stallRepeatLimit: 9, sameErrorLimit: 9, requireVerifiedCompletion: false },
     sshDevices: [{
       id: "android-ssh-device",
       name: "Android 设备",
@@ -313,7 +324,8 @@ describe("安卓导入的 PC-only 保留清单", () => {
       "to-android",
     ) as Record<string, unknown>;
     for (const key of [
-      "proxyConfig", "preferredPort", "sandboxRestricted", "subagent", "keybindings",
+      "proxyConfig", "preferredPort", "sandboxRestricted", "sandboxExtraWritableDirs", "subagent", "workspaceTools",
+      "agentLoop", "keybindings",
       "webPasswordHash", "sshDevices", "imAccess", "shellPath",
       "exportKelivoBackup", "kelivoSyncOptions", "backupScope", "backupAllData",
     ]) {

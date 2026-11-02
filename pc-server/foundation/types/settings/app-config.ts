@@ -11,6 +11,10 @@ export interface AppConfig {
    *  不变,故改它需重启生效(端口设置同款)。容器部署的档位由挂载表决定,此开关不生效。
    *  机器级安全姿态:导出安卓备份剥离,pc-backup(PC→PC)保留。 */
   sandboxRestricted: boolean;
+  /** PC-only:受限沙盒的额外可写目录(全局)。受限档下后端只能写数据目录与工作区,
+   *  技能调用的外部工具目录等需要写时在此声明;启动编排会把它们标为 Low(见
+   *  workspace/writable-dirs.ts)。与开关同款:改动下次重启生效。 */
+  sandboxExtraWritableDirs: string[];
   /** PC-only:用户上一次选择的工作区权限档位(新建工作区的默认档位记忆);
    *  null = 从未选择过,新建取 balanced(默认权限)。 */
   workspaceLastPermissionPreset: string | null;

@@ -38,6 +38,8 @@ import {
 } from "../app-config/media-generation-config";
 import { normalizeSshDevices } from "../ssh/devices";
 import { normalizeSubagentConfig } from "../foundation/types/settings/subagent-config";
+import { normalizeAgentLoopConfig } from "../foundation/types/settings/agent-loop-config";
+import { normalizeWorkspaceToolsConfig } from "../foundation/types/settings/workspace-tools-config";
 import { normalizeImAccess } from "../im/config";
 import { ensureBuiltinMcpServers } from "../tools/mcp-builtin";
 import { hashFileSha256, rewriteAndroidFileUrlsDeep, rewritePcFileUrlsDeep } from "../backup/file-refs";
@@ -122,6 +124,12 @@ export function normalizeState(input: Partial<State>): State {
   // 子智能体设置(PC-only):存量 state 无该字段或字段损坏 → 逐字段回落默认;
   // 写入侧区间校验在 API,这里只做加载宽容归一。
   normalized.settings.subagent = normalizeSubagentConfig((parsedSettings as unknown as Record<string, unknown>).subagent);
+  // 工作区工具面契约(PC-only):同样加载宽容——老 state 无此键 → 全关,行为不变。
+  normalized.settings.workspaceTools = normalizeWorkspaceToolsConfig(
+    (parsedSettings as unknown as Record<string, unknown>).workspaceTools,
+  );
+  // 自主循环(PC-only):老 state 无此键 → 全默认(关闭),行为不变。
+  normalized.settings.agentLoop = normalizeAgentLoopConfig((parsedSettings as unknown as Record<string, unknown>).agentLoop);
   normalized.settings.dismissedProviderIds = uniqueStrings(getStringArray(normalized.settings.dismissedProviderIds));  normalized.settings.dismissedAssistantIds = uniqueStrings(getStringArray(normalized.settings.dismissedAssistantIds));
   const dismissedProviderIds = new Set(normalized.settings.dismissedProviderIds);
   const dismissedAssistantIds = new Set(normalized.settings.dismissedAssistantIds);
@@ -168,6 +176,9 @@ export function normalizeState(input: Partial<State>): State {
       mcpToolOverrides: isRecord(assistant.mcpToolOverrides)
         ? assistant.mcpToolOverrides as Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>>
         : {},
+      // S9:工具发现行助手级灰度开关。只认显式 true,缺省/损坏一律 false——
+      // 老 state 升级后行为与引入前逐字一致。
+      enableToolDiscovery: rest.enableToolDiscovery === true,
     };
   });
   // memorySettings 规范化 + M1 迁移推断:老用户首次升级(settings 无 memorySettings)时,
@@ -226,6 +237,11 @@ export function normalizeState(input: Partial<State>): State {
   // 记忆场景模型（去重/整理共用）:老 state 无此键 → 空串（未配置）。
   if (typeof normalized.settings.memoryModelId !== "string") normalized.settings.memoryModelId = "";
   normalized.settings.displaySetting = { ...defaults.displaySetting, ...(normalized.settings.displaySetting ?? {}) };
+  // 桌面伴侣形象：帕秋莉已下架，老 state 里残留的其它 id 归一到在架那只，
+  // 免得设置页读到一张不存在的皮肤（前端 normalizeCompanionSkin 也兜同一件事）。
+  if (normalized.settings.displaySetting.companionSkin !== "deepy") {
+    normalized.settings.displaySetting.companionSkin = "deepy";
+  }
   // 特性 C：记忆向量设置的字段级规范化（老 state 无此键 → 默认关闭；非法数值逐项夹取）。
   normalized.settings.memoryVectorSettings = normalizeMemoryVectorSettings(
     (parsedSettings as unknown as Record<string, unknown>).memoryVectorSettings,

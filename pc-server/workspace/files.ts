@@ -4,7 +4,6 @@
 // 所有函数以 workspace root 为界；rel 路径来自前端，视作不可信输入。
 
 import { closeSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { basename, dirname, extname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type { Workspace } from "../foundation/types";
@@ -12,6 +11,7 @@ import { isWindowsReservedName, reservedNameSafeFsPath, sweepWindowsReservedName
 import { reportError } from "../observability/app-errors";
 import { assertInsideWorkspace, READ_HARD_LIMIT_BYTES, WRITE_HARD_LIMIT_BYTES } from "./boundary";
 import { detectSupportedImageMimeTypeFromFile } from "./tools/mime";
+import { sha256Short } from "./ops/revision";
 
 export interface WorkspaceFileEntry {
   name: string;
@@ -85,10 +85,6 @@ function readBytesLimited(fsPath: string, limit: number): Buffer {
   } finally {
     closeSync(fd);
   }
-}
-
-function sha256Short(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex").slice(0, 32);
 }
 
 function detectEol(text: string): "\n" | "\r\n" {

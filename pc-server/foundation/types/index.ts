@@ -3,6 +3,7 @@
 
 import type { MediaGenerationProviderType, Settings } from "./settings";
 import type { MessagePart } from "./parts";
+import type { ToolBoundaryObserver } from "../tool-boundary";
 
 export * from "./parts";
 export * from "./dto";
@@ -207,6 +208,10 @@ export interface Assistant {
   /** 专题9:允许"会话级"绑定提示词注入/世界书(对齐安卓 Assistant.allowConversationPromptInjection)。
    *  开启后生效的注入 id 集来自 Conversation.modeInjectionIds/lorebookIds,完全取代助手级集合。 */
   allowConversationPromptInjection: boolean;
+  /** S9(PC 专属):工具发现行灰度开关。开启后 MCP 工具默认不整批进请求,只暴露
+   *  `search_tools` 发现行,命中工具按会话登记、下一轮才携带 schema;核心工具常驻。
+   *  可选字段:老数据/安卓导入缺省按 false,行为与引入前逐字一致。 */
+  enableToolDiscovery?: boolean;
 }
 
 /** 桌面端原生支持的 ASR 判别符。ASR 无注册表,这是「本端认识且能跑」的单源;
@@ -790,6 +795,9 @@ export type StreamHooks = {
   message?: Message;
   conversation?: Conversation;
   node?: MessageNode;
+  /** 多步可观测性(O4)：审批最终判定处的边界观测(编排层适配到 run tracker)。
+   *  只在参数齐备的终局判定调用,流式下界建卡不观测。 */
+  observeToolBoundary?: ToolBoundaryObserver;
 };
 
 // Per-round Claude SSE reader. Returns the assistant content blocks captured during the stream

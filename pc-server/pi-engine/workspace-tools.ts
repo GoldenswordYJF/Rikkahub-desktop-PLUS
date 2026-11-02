@@ -23,10 +23,13 @@
 
 import type { ToolDefinition } from "../../pi/packages/coding-agent/src/core/extensions/types.ts";
 import type { Assistant, Conversation, JsonValue } from "../foundation/types";
+import type { ToolBoundaryObserver } from "../foundation/tool-boundary";
 import type { GenerationEventSink } from "../inference-engine/events";
 import { initialApprovalState } from "../tools/approval";
 import type { WorkspaceToolName } from "../workspace/approval";
 import { executeWorkspaceToolCore, jsonSafeDetails, openAiWorkspaceTools } from "../workspace/runtime";
+import { readContractEnabled, READ_CONTRACT_PROMPT_SNIPPET } from "../workspace/ops/read-contract";
+import type { ReadEvidenceHandle } from "../workspace/ops/read-dedup";
 import type { WorkspaceToolOutput } from "../workspace/tools/types";
 import { prepareEditArguments } from "../workspace/tools/edit";
 import { gateToolApproval } from "../inference-engine/approval-flow";
@@ -34,9 +37,11 @@ import { gateToolApproval } from "../inference-engine/approval-flow";
 type PiToolParameters = ToolDefinition["parameters"];
 type PiToolResult = Awaited<ReturnType<ToolDefinition["execute"]>>;
 
-/** pi 内建工具的 Available tools 一行摘要,逐字镜像(来源 file:line 见各行尾)。 */
-const PROMPT_SNIPPETS: Record<WorkspaceToolName, string> = {
+/** pi 内建工具的 Available tools 一行摘要,逐字镜像(来源 file:line 见各行尾)。
+ *  导出给 scripts/tool-surface.ts 计量工具面用(系统提示词增量也算进成本)。 */
+export const PROMPT_SNIPPETS: Record<WorkspaceToolName, string> = {
   read: "Read file contents", // tools/read.ts:213
+  read_files: "Read multiple files in one call (1-32 files, per-file offset/limit)",
   bash: "Execute bash commands (ls, grep, find, etc.)", // tools/bash.ts:328
   edit: "Make precise file edits with exact text replacement, including multiple disjoint edits in one call", // tools/edit.ts:297
   write: "Create or overwrite files", // tools/write.ts:191
@@ -48,7 +53,7 @@ const PROMPT_SNIPPETS: Record<WorkspaceToolName, string> = {
 /** pi 内建工具的 Guidelines 追加条目,逐字镜像。bash 的 PI_* 环境变量条目不镜像
  *  (它以 exposeSessionEnvironment 为前提,我们不暴露 pi 会话环境变量);grep/find/ls
  *  与 pi 一致无条目。 */
-const PROMPT_GUIDELINES: Partial<Record<WorkspaceToolName, string[]>> = {
+export const PROMPT_GUIDELINES: Partial<Record<WorkspaceToolName, string[]>> = {
   read: ["Use read to examine files instead of cat or sed."], // tools/read.ts:214
   write: ["Use write only for new files or complete rewrites."], // tools/write.ts:192
   edit: [
@@ -59,6 +64,16 @@ const PROMPT_GUIDELINES: Partial<Record<WorkspaceToolName, string[]>> = {
   ], // tools/edit.ts:299-304
 };
 
+/** 契约开启时给 edit 追加一条用法指引;关闭时与 pi 原文逐字一致。 */
+function promptGuidelinesFor(name: WorkspaceToolName): string[] | undefined {
+  const base = PROMPT_GUIDELINES[name];
+  if (name !== "edit" || !readContractEnabled()) return base;
+  return [
+    ...(base ?? []),
+    "When the file's last read returned a revision, pass it as expectedRevision to edit; use dryRun to preview a change without writing.",
+  ];
+}
+
 export interface PiWorkspaceToolsContext {
   /** 会话对象(审批矩阵的 workspaceId/workspaceCwd 语境 + 执行内核的会话归属守卫)。 */
   conversation: Conversation;
@@ -68,6 +83,11 @@ export interface PiWorkspaceToolsContext {
   sink: GenerationEventSink;
   /** 审批作用域(缺省 = conversationId)。子智能体各领独立 scope,收尾清扫互不误杀。 */
   approvalScopeId?: string;
+  /** S4:读取去重的原文证据句柄(由 orchestrator 创建、runner 挂探针;不传 = 子智能体/
+   *  无证据场景,重复读取一律回全文)。 */
+  readEvidence?: ReadEvidenceHandle;
+  /** O4:边界观测(审批最终判定 + 执行前)。不传 = 不观测,行为不变。 */
+  observer?: ToolBoundaryObserver;
 }
 
 /** 内核产出 → pi AgentToolResult。content 形状与 pi TextContent/ImageContent 同构
@@ -92,8 +112,9 @@ function buildTool(
     // pi 内建工具的 label 就是小写工具名(tools/*.ts);label 仅 TUI 用,保持同构。
     label: name,
     description: declaration.description,
-    promptSnippet: PROMPT_SNIPPETS[name],
-    ...(PROMPT_GUIDELINES[name] ? { promptGuidelines: PROMPT_GUIDELINES[name] } : {}),
+    // S2:read 契约开启时换成带行号/revision 的一行摘要;关闭时逐字保持 pi 原文。
+    promptSnippet: name === "read" && readContractEnabled() ? READ_CONTRACT_PROMPT_SNIPPET : PROMPT_SNIPPETS[name],
+    ...(promptGuidelinesFor(name) ? { promptGuidelines: promptGuidelinesFor(name) } : {}),
     parameters: declaration.parameters as unknown as PiToolParameters,
     ...(name === "edit" ? { prepareArguments: prepareEditArguments as ToolDefinition["prepareArguments"] } : {}),
     executionMode: "sequential",
@@ -102,7 +123,10 @@ function buildTool(
       // —— 审批内化:参数齐备的终局判定(与聊天引擎 initialApprovalState 同一函数),
       // 生命周期走共享状态机;返回 true = 用户对 pending 卡显式批准,是危险命令
       // 拦截的知情同意放行门(workspace/runtime.ts),仅此路径可置 true。 ——
-      const approval = initialApprovalState(name, ctx.assistant, ctx.conversation, JSON.stringify(args));
+      const approval = initialApprovalState(name, ctx.assistant, ctx.conversation, JSON.stringify(args), {
+        toolCallId,
+        ...(ctx.observer ? { observer: ctx.observer } : {}),
+      });
       // 域4-1:通知摘要取审批对象本体(bash=command,write/edit/read=path),截断防爆通知体。
       const approvalTarget = args.command ?? args.path;
       const approvalSummary = typeof approvalTarget === "string" && approvalTarget.trim() ? approvalTarget.trim().slice(0, 120) : undefined;
@@ -119,6 +143,10 @@ function buildTool(
         conversationId: ctx.conversation.id,
         userApproved,
         signal,
+        toolCallId,
+        ...(ctx.observer ? { observer: ctx.observer } : {}),
+        // S4:重复读取去重靠「原全文仍在本轮消息里」的证据;子智能体不传句柄 → 全文。
+        ...(ctx.readEvidence ? { readEvidence: ctx.readEvidence } : {}),
         // 执行中部分输出走 pi 原生 onUpdate 通道(→ tool_execution_update → 桥 →
         // tool_result 快照;bash 内核 100ms 自节流,SSE 33ms 合帧,无双重节流迟滞)。
         onUpdate: onUpdate ? (partial) => onUpdate(toPiToolResult(name, partial)) : undefined,

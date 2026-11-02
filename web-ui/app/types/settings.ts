@@ -52,6 +52,9 @@ export type { MemoryExperimentSettings } from "@server/foundation/types/settings
 // 实验：心情状态设置切片（PC 独有，`moodExperimentSettings`）。
 export type { MoodExperimentSettings, MoodInjectMode } from "@server/foundation/types/settings";
 
+// 实验：自主循环设置切片（PC 独有，`agentLoop`；安卓导出剥离）。
+export type { AgentLoopSettings } from "@server/foundation/types/settings";
+
 /**
  * Display settings — user nickname, avatar, theme, fonts and other purely visual preferences.
  * 服务端存 Record<string, JsonValue>(安卓透传 + PC-only 字段剥离逻辑见 pcOnlyDisplayFields),
@@ -101,6 +104,15 @@ export interface DisplaySetting {
   ttsOnlyReadOutsideBrackets?: boolean;
   /** User-resizable chat input min-height in px (null = default). PC-only. */
   chatInputHeight?: number | null;
+  /** 实验：输入框旁的桌面伴侣。PC-only，导出安卓时剥离。 */
+  showCompanion?: boolean;
+  /** 帕秋莉已下架，目前只剩大肥鱼；旧数据里的其它 id 由 normalizeCompanionSkin 兜底。 */
+  companionSkin?: "deepy";
+  companionBubbles?: boolean;
+  /** 精灵整数倍缩放（1–4，默认 2）。非整数倍会让像素图发虚，所以只给档位不给滑杆。 */
+  companionScale?: number;
+  /** 相对默认锚点（输入列左下）的像素位移；拖拽落点即写这里。 */
+  companionPos?: { x: number; y: number };
   /** 专题8:UI 主题与语言的权威存储(原在 localStorage,按 origin 隔离,改端口即丢)。
    *  PC-only,已在 pc-server pcOnlyDisplayFields 剥离清单,导出安卓不可见。 */
   themeMode?: "light" | "dark" | "system";
@@ -110,6 +122,13 @@ export interface DisplaySetting {
   /** 一键折叠思考与工具调用:开=工作步骤卡默认收成一行「展开 N 条」,流式中仍显示最新一条。
    *  PC-only,已在 pc-server pcOnlyDisplayFields 剥离清单,导出安卓不可见。 */
   collapseAllSteps?: boolean;
+  /** 工具调用折成一行(Claude Code 式 trace):开=每个工具步骤默认只占一行,参数摘要与
+   *  状态徽标同行,点开才出预览;关=沿用旧的默认展开预览。PC-only,导出安卓时剥离。 */
+  toolTraceCompact?: boolean;
+  /** 计划面板。开=向模型声明 update_plan 工具,助手把多步任务写成一份可回放的计划,
+   *  右侧栏据此渲染勾选清单;关=模型不再产出新计划(历史里的既有计划照常可读)。
+   *  默认开(「不写即开」,与 toolTraceCompact 同向)。PC-only,导出安卓时剥离(安卓没有这个工具)。 */
+  planPanel?: boolean;
   [key: string]: unknown;
 }
 

@@ -17,7 +17,15 @@
 import { create } from "zustand";
 
 import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes, replaceNodesRange } from "~/lib/conversation-sync";
-import type { ConversationDto, ConversationNodesPageDto, ConversationNodeUpdateEventDto, ConversationSnapshotMetaEventDto, ConversationTextDeltaEventDto, EngineStatusEventDto } from "~/types";
+import {
+  AGENT_RUN_LIVE_EVENTS_MAX,
+  agentRunWindowFromSnapshot,
+  appendAgentRunEvent,
+  emptyAgentRunWindow,
+  prependAgentRunEventPage,
+  type AgentRunEventWindow,
+} from "~/lib/agent-run-events";
+import type { AgentRunEventDto, AgentRunPushDto, AgentRunSnapshotDto, AgentRunSummary, ConversationDto, ConversationNodesPageDto, ConversationNodeUpdateEventDto, ConversationSnapshotMetaEventDto, ConversationTextDeltaEventDto, EngineStatusEventDto } from "~/types";
 
 export interface ConversationEntry {
   /** 最后已知快照(含已应用的流式增量);null = 尚无内容(等快照)。 */
@@ -31,11 +39,22 @@ export interface ConversationEntry {
 /** pi 引擎瞬态状态(P5):只存 busy 条目,busy:false 即删键。 */
 export type EngineBusyStatus = Extract<EngineStatusEventDto, { busy: true }>;
 
+/** 自主循环运行流水(开关关闭时服务端不推帧,本切片恒为空)。
+ *  窗口字段与 SSE 增量共用 lib/agent-run-events 的纯函数模型。 */
+export interface ConversationAgentRun extends AgentRunEventWindow {
+  run: AgentRunSummary;
+  /** 每次全量窗口替换(首帧/重同步/重连)自增;用于作废在途的“加载更早”响应。 */
+  windowToken: number;
+}
+
 interface ConversationStoreState {
   entries: Record<string, ConversationEntry>;
   /** 按会话的引擎瞬态状态(压缩中/自动重试)。SSE engine-status 帧驱动;不参与
    *  entries 的 LRU/缓存语义(瞬态,断流即清,不值得进快照协商)。 */
   engineStatus: Record<string, EngineBusyStatus>;
+  /** 按会话的「本次/最近一次」运行流水(PC 专属自主循环)。同一会话只保留最新 run;
+   *  增量帧按 seq 去重追加,连接首帧的全量快照整体替换。 */
+  agentRuns: Record<string, ConversationAgentRun>;
 }
 
 const CACHE_MAX = 20;
@@ -85,6 +104,7 @@ const EMPTY_ENTRY: ConversationEntry = { detail: null, subscribing: false, error
 export const useConversationStore = create<ConversationStoreState>(() => ({
   entries: {},
   engineStatus: {},
+  agentRuns: {},
 }));
 
 /** 快照落地:清错误、结束订阅建立态。窗口化快照(I-2)与本地已加载的更早历史做
@@ -303,19 +323,179 @@ export function useConversationEngineStatus(id: string | null): EngineBusyStatus
   return useConversationStore((state) => (id ? state.engineStatus[id] : undefined));
 }
 
+// ===== 自主循环运行流水(agent-loop)=====
+// 服务端每个事件帧都带「当前 run 摘要 + 本次事件」;连接首帧另带 events 全量。
+// 面板只在有活跃订阅时才会有帧,但读的是缓存里的"最近一次运行"——生成结束后
+// 面板仍可回看,切会话后由重连首帧的 agent-run 快照重建(见 api/sse.ts)。
+
+/** 实时窗口上限在 lib/agent-run-events;用户显式加载过更早页后不再按窗口裁剪。 */
+/** 运行流水按会话缓存的上限:entries 的 LRU 只有 20,这里放宽到 40 防长会话堆积。 */
+const AGENT_RUN_CACHE_MAX = 40;
+
+function pruneAgentRuns(
+  runs: Record<string, ConversationAgentRun>,
+  keepId: string,
+): Record<string, ConversationAgentRun> {
+  if (Object.keys(runs).length <= AGENT_RUN_CACHE_MAX) return runs;
+  const next = { ...runs };
+  for (const id of Object.keys(next)) {
+    if (Object.keys(next).length <= AGENT_RUN_CACHE_MAX) break;
+    if (id !== keepId && !cachedOrder.includes(id)) delete next[id];
+  }
+  return next;
+}
+
+/** agent-run SSE 帧落地。返回:
+ *  - applied:已落地;
+ *  - gap:增量与当前尾部不连续,调用方应重新 GET 最新快照(不在客户端猜补);
+ *  - ignored:重放/更旧的帧,或纯状态帧且无变化。
+ *  全量帧(events 存在)整体替换窗口(重连/重同步即清除已加载的更早页);
+ *  增量帧按 seq 去重、排序后追加;run.id 变化意味着新一次运行。 */
+export function setConversationAgentRun(
+  id: string,
+  push: AgentRunPushDto,
+): "applied" | "gap" | "ignored" {
+  let outcome: "applied" | "gap" | "ignored" = "ignored";
+  useConversationStore.setState((state) => {
+    const current = state.agentRuns[id];
+    const sameRun = current !== undefined && current.run.id === push.run.id;
+    let next: ConversationAgentRun;
+    if (push.events) {
+      next = {
+        run: push.run,
+        ...agentRunWindowFromSnapshot(push.events, push.hasMore ?? false),
+        windowToken: (sameRun ? current.windowToken : 0) + 1,
+      };
+      outcome = "applied";
+    } else if (push.event) {
+      const base: ConversationAgentRun = sameRun
+        ? current
+        : { run: push.run, ...emptyAgentRunWindow(), windowToken: 0 };
+      const appended = appendAgentRunEvent(base, push.event);
+      if (appended.outcome === "gap") {
+        outcome = "gap";
+        return state;
+      }
+      if (appended.outcome === "ignored") {
+        // 迟到重放:流水不动,但终局状态帧仍可能带来更完整的 run 摘要。
+        if (sameRun && current.run === push.run) return state;
+        next = { ...base, run: push.run };
+      } else {
+        next = { ...base, run: push.run, ...appended.window, windowToken: base.windowToken };
+      }
+      outcome = appended.outcome === "applied" ? "applied" : "ignored";
+    } else {
+      if (sameRun && current.run === push.run) return state;
+      next = sameRun
+        ? { ...current, run: push.run }
+        : { run: push.run, ...emptyAgentRunWindow(), windowToken: 0 };
+      outcome = "applied";
+    }
+    return {
+      agentRuns: pruneAgentRuns({ ...state.agentRuns, [id]: next }, id),
+    };
+  });
+  return outcome;
+}
+
+/** GET /agent-run 快照落地(缺口重同步/面板主动拉取)。run=null 表示服务端已无可展示运行。 */
+export function applyAgentRunSnapshot(id: string, snapshot: AgentRunSnapshotDto): "applied" | "cleared" {
+  if (!snapshot.run) {
+    clearConversationAgentRun(id);
+    return "cleared";
+  }
+  setConversationAgentRun(id, {
+    type: "agent_run",
+    run: snapshot.run,
+    event: null,
+    events: snapshot.events,
+    hasMore: snapshot.hasMore,
+    nextBeforeSeq: snapshot.nextBeforeSeq,
+    throughSeq: snapshot.throughSeq,
+  });
+  return "applied";
+}
+
+/** 把一页更早事件并入实时窗口。expectedWindowToken 不匹配(期间发生过全量替换)即丢弃,
+ *  防止旧请求把已被重连清空的旧页拼回新窗口。 */
+export function prependConversationAgentRunPage(
+  id: string,
+  runId: string,
+  page: { events: AgentRunEventDto[]; hasMore: boolean },
+  expectedWindowToken: number,
+): boolean {
+  let applied = false;
+  useConversationStore.setState((state) => {
+    const current = state.agentRuns[id];
+    if (!current || current.run.id !== runId || current.windowToken !== expectedWindowToken) return state;
+    applied = true;
+    return {
+      agentRuns: {
+        ...state.agentRuns,
+        [id]: { ...current, ...prependAgentRunEventPage(current, page) },
+      },
+    };
+  });
+  return applied;
+}
+
+export function clearConversationAgentRun(id: string): void {
+  useConversationStore.setState((state) => {
+    if (!(id in state.agentRuns)) return state;
+    const next = { ...state.agentRuns };
+    delete next[id];
+    return { agentRuns: next };
+  });
+}
+
+/** 无订阅后的后台缓存收敛:用户加载过的更早页回落到固定窗口,避免把完整事件流
+ *  长期留在内存里(重新打开会话后仍可通过“加载更早”补回)。只在 extended 时动作。 */
+export function trimConversationAgentRunWindow(id: string): void {
+  useConversationStore.setState((state) => {
+    const current = state.agentRuns[id];
+    if (!current || !current.extended) return state;
+    const trimmed = current.events.length > AGENT_RUN_LIVE_EVENTS_MAX;
+    const events = trimmed
+      ? current.events.slice(-AGENT_RUN_LIVE_EVENTS_MAX)
+      : current.events;
+    return {
+      agentRuns: {
+        ...state.agentRuns,
+        [id]: {
+          ...current,
+          events,
+          hasMore: current.hasMore || trimmed,
+          minSeq: events.length > 0 ? events[0]!.seq : null,
+          throughSeq: events.length > 0 ? events[events.length - 1]!.seq : null,
+          extended: false,
+        },
+      },
+    };
+  });
+}
+
+/** 「本次运行」面板订阅(窄选择器:流式正文增量不经过这里)。 */
+export function useConversationAgentRun(id: string | null): ConversationAgentRun | undefined {
+  return useConversationStore((state) => (id ? state.agentRuns[id] : undefined));
+}
+
 /** 删除会话/清库时显式驱逐(原 detailCache.delete + resetDetail 的合并语义)。 */
 export function evictConversations(ids: readonly string[]): void {
   useConversationStore.setState((state) => {
-    const present = ids.filter((id) => id in state.entries || id in state.engineStatus);
+    const present = ids.filter(
+      (id) => id in state.entries || id in state.engineStatus || id in state.agentRuns,
+    );
     if (present.length === 0) return state;
     const next = { ...state.entries };
     const nextStatus = { ...state.engineStatus };
+    const nextRuns = { ...state.agentRuns };
     for (const id of present) {
       delete next[id];
       delete nextStatus[id];
+      delete nextRuns[id];
       dropLru(id);
     }
-    return { entries: next, engineStatus: nextStatus };
+    return { entries: next, engineStatus: nextStatus, agentRuns: nextRuns };
   });
 }
 
@@ -347,5 +527,5 @@ export function useConversationEntry(id: string | null): ConversationEntry | und
 export function resetConversationStoreForTest(): void {
   cachedOrder.length = 0;
   retention.clear();
-  useConversationStore.setState({ entries: {}, engineStatus: {} });
+  useConversationStore.setState({ entries: {}, engineStatus: {}, agentRuns: {} });
 }

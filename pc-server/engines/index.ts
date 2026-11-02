@@ -15,7 +15,14 @@
 // 不产副作用。
 
 import type { Assistant, Conversation, Model, Provider } from "../foundation/types";
-import type { GenerationEventSink, GenerationTarget, ToolExecutor } from "../inference-engine/events";
+import type { ToolBoundaryObserver } from "../foundation/tool-boundary";
+import type {
+  GenerationEventSink,
+  GenerationTarget,
+  LoopDecision,
+  LoopToolObservation,
+  ToolExecutor,
+} from "../inference-engine/events";
 import type { WorkspaceRuntime } from "../workspace/runtime";
 import { createChatAdapter } from "./chat-adapter";
 import { createPiAdapter } from "./pi-adapter";
@@ -59,6 +66,20 @@ export interface EngineRunContext {
    *  落库、换绑落点并通知 FIFO 队列移除)。返回空数组 = 无注入。声明 "none" 的引擎收不到
    *  此回调(协调器不下发)。 */
   onSteerBoundary?: () => string[];
+  /** 自主循环(S1):轮边界观察点。所有引擎在每轮发请求前调用(聊天 = 工具循环每轮;
+   *  pi = turn_start;未来引擎 = 即将发请求前)。round 从 1 起,同轮重复调用幂等。
+   *  只用于运行记录计数,不得据此改生成语义(判定表是 S3 的事)。不传 = 无观测。 */
+  onRunBoundary?: (round: number) => void;
+  /** 自主循环(S3):工具批执行完、下一模型请求前的判定表。聊天 = 工具循环每轮工具批后;
+   *  pi = turn_end(toolResults 非空)。返回 inject 的引擎负责把提示注入下一轮(聊天 = 附加
+   *  user turn;pi = session.steer),返回 halt 的以 AgentLoopHaltError 收尾。不传 = 无判定。 */
+  onToolRoundEnd?: (observations: LoopToolObservation[]) => LoopDecision;
+  /** 自主循环(S3):模型不调用工具、即将收尾的完成校验。聊天 = 无工具调用的最终轮;
+   *  pi = turn_end(toolResults 为空)。不传 = 维持"无工具调用即答完"。 */
+  onFinalCandidate?: () => LoopDecision;
+  /** 多步可观测性(O4):审批最终判定处的边界观测。只有 agentLoop 开启时才注入;
+   *  引擎只把它转交给审批判定,不自行解释。不传 = 无观测(行为与引入前一致)。 */
+  onToolBoundary?: ToolBoundaryObserver;
 }
 
 /** 引擎无关的压缩输入包(编排器压缩入口装配,与 EngineRunContext 同哲学:

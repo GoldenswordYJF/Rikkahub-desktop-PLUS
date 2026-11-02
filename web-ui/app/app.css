@@ -1637,6 +1637,32 @@
   pointer-events: none;
 }
 
+/* `?msg=&tool=` 定位:工具卡短暂描边,回答"点的是哪一张卡"。 */
+@keyframes rikkahub-tool-focus {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px color-mix(in oklch, var(--primary) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.rikkahub-tool-focus {
+  border-radius: 0.75rem;
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 45%, transparent);
+  animation: rikkahub-tool-focus 1.2s ease-out 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rikkahub-tool-focus {
+    animation: none;
+  }
+}
+
 /* Utility animation classes for components */
 .rikkahub-animate-fade-in-up {
   animation: rikkahub-fade-in-up 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -1989,4 +2015,249 @@ body.rk-dragging-cursor * {
 }
 @media (prefers-reduced-motion: reduce) {
   [data-settings-flash] { animation: none; }
+}
+
+/* ── 实验性桌面伴侣(components/companion)──────────────────────────── */
+/* 容器查询基准在会话窗格(conversations.tsx 的 .chat-pane):宠物靠「窗格实际宽度」
+   决定显隐。60rem 以下输入列两侧只剩 <96px 空档,放不下 80px 的宠物,整体隐藏而不是
+   挤压输入框。 */
+.chat-pane {
+  container-type: inline-size;
+  container-name: chat-pane;
+}
+
+/* 默认锚点:贴在输入列左侧、右边缘留 10px 呼吸位——用 right 锚定,所以换多大档都往左长,
+   不会盖住输入卡。位移(companionPos)是相对这里的像素增量,拖拽落点即写这里。 */
+.companion-dock {
+  display: none;
+  position: absolute;
+  right: calc(100% + 10px);
+  bottom: 20px;
+  z-index: 20;
+  pointer-events: none;
+  /* 宽高由「皮肤像素 × 整数档位」内联给。 */
+  will-change: transform;
+}
+
+/* 显隐按档位分别设门槛:输入列(max-w-3xl=48rem)两侧的空档是 (窗格宽-48rem)/2,
+   宠物宽 + 10px 呼吸位必须放得下,否则宁可藏起来也不压输入框。 */
+@container chat-pane (min-width: 55rem) {
+  .companion-dock[data-companion-scale="1"] {
+    display: block;
+  }
+}
+
+@container chat-pane (min-width: 60rem) {
+  .companion-dock[data-companion-scale="2"] {
+    display: block;
+  }
+}
+
+@container chat-pane (min-width: 65rem) {
+  .companion-dock[data-companion-scale="3"] {
+    display: block;
+  }
+}
+
+@container chat-pane (min-width: 70rem) {
+  .companion-dock[data-companion-scale="4"] {
+    display: block;
+  }
+}
+
+.companion-view {
+  position: relative;
+}
+
+.companion-canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.companion-pet {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ds-radius-md);
+  background: transparent;
+  cursor: grab;
+  pointer-events: auto;
+  outline: none;
+  /* 拖拽语义:触摸要跟着手指走而不是滚页,按住滑动也不能选中旁边的文字。 */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.companion-pet.is-dragging {
+  cursor: grabbing;
+}
+
+.companion-pet:focus-visible {
+  box-shadow: 0 0 0 2px var(--ds-brand-primary);
+}
+
+/* 站姿轻浮:幅度小(3px)、周期长,像呼吸而不是抖动;影子只作落地感暗示。 */
+.companion-pet-body {
+  display: block;
+  line-height: 0;
+  transform-origin: 50% 92%;
+  animation: companion-bob 4.6s var(--ds-ease-soft) infinite;
+  filter: drop-shadow(0 5px 6px color-mix(in oklch, var(--foreground) 20%, transparent));
+}
+
+.companion-pet-body.is-happy {
+  animation: companion-hop 620ms var(--ds-ease-spring) 2;
+}
+
+.companion-pet-body.is-sleeping {
+  animation: companion-breathe 4.5s ease-in-out infinite;
+}
+
+@keyframes companion-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes companion-hop {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  30% {
+    transform: translateY(-10px) scale(1.03, 0.97);
+  }
+  55% {
+    transform: translateY(0) scale(0.98, 1.03);
+  }
+  78% {
+    transform: translateY(-4px) scale(1);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes companion-breathe {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translateY(2px) scale(1.02, 1.04);
+    opacity: 1;
+  }
+}
+
+/* 气泡:左对齐从宠物头顶长出,小尾巴指回宠物。字号/最大宽度跟着档位走,
+   允许短暂压住输入卡左沿(悬浮层,不影响操作)。 */
+.companion-bubble {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 2px);
+  width: max-content;
+  /* 标准档仍是原来的 12px / 168px,特大档不至于两个字就撑爆。 */
+  max-width: calc(72px + 48px * var(--companion-scale, 2));
+  font-size: clamp(11px, calc(5.5px * var(--companion-scale, 2)), 16px);
+  padding: 6px 10px;
+  border: 1px solid var(--ds-divider);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-menu-bg);
+  color: var(--ds-text-primary);
+  line-height: 1.45;
+  box-shadow: 0 10px 24px -16px color-mix(in oklch, var(--foreground) 45%, transparent);
+  animation: companion-bubble-in 180ms var(--ds-ease-swift);
+  pointer-events: none;
+}
+
+.companion-bubble::after {
+  content: "";
+  position: absolute;
+  left: 34px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  background: var(--ds-menu-bg);
+  border-right: 1px solid var(--ds-divider);
+  border-bottom: 1px solid var(--ds-divider);
+  transform: rotate(45deg);
+}
+
+@keyframes companion-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.companion-zzz {
+  position: absolute;
+  top: -2px;
+  right: 6px;
+  color: var(--ds-text-tertiary);
+  font-size: clamp(9px, calc(5px * var(--companion-scale, 2)), 20px);
+  font-weight: 600;
+  letter-spacing: 2px;
+  animation: companion-zzz-float 2.2s ease-in-out infinite alternate;
+}
+
+@keyframes companion-zzz-float {
+  from {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0.35;
+    transform: translateY(-6px);
+  }
+}
+
+.companion-alert {
+  position: absolute;
+  top: -2px;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: clamp(14px, calc(8px * var(--companion-scale, 2)), 30px);
+  height: clamp(14px, calc(8px * var(--companion-scale, 2)), 30px);
+  border-radius: 999px;
+  background: var(--ds-brand-primary);
+  color: var(--ds-brand-primary-text);
+  font-size: clamp(10px, calc(5px * var(--companion-scale, 2)), 18px);
+  font-weight: 700;
+  line-height: 1;
+  animation: companion-alert-pulse 1.4s var(--ds-ease-soft) infinite;
+}
+
+@keyframes companion-alert-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .companion-pet-body,
+  .companion-pet-body.is-happy,
+  .companion-pet-body.is-sleeping,
+  .companion-zzz,
+  .companion-alert,
+  .companion-bubble {
+    animation: none;
+  }
 }

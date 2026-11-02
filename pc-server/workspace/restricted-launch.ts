@@ -14,7 +14,7 @@
 
 import { dataDir } from "../foundation/paths";
 import { bootNote } from "../observability/boot-trace";
-import { peekSandboxRestricted } from "../persistence/json-store";
+import { peekSandboxExtraWritableDirs, peekSandboxRestricted } from "../persistence/json-store";
 import {
   collectFolderWorkspaceRoots,
   readIntegrityLabel,
@@ -80,8 +80,36 @@ export function maybeRelaunchForRestrictedSandbox(): RestrictedLaunchOutcome {
   // 记录里已有的目录不再 icacls(标签是粘性文件系统状态;重放秒级传播不可接受)。
   // 代价是记录与真实标签可能脱节(用户手动 icacls 撤了标签)——方向安全:没标成 Low
   // 的目录 agent 写不进去,只是该工作区降级为只读,/api/app/sandbox 的标注汇报行可见。
-  const already = new Set((record?.dirs ?? []).map((dir) => dir.toLowerCase()));
-  const targets = [dataDir, ...collectFolderWorkspaceRoots()].filter((dir) => !already.has(dir.toLowerCase()));
+  //
+  // 额外可写目录(全局声明 + 各 stdio MCP 服务器自带的 sandboxWritableDirs)同样并入
+  // 本应标注集合。从声明里删掉的目录必须还原 Medium:用户删的是"例外",不是沙盒本身。
+  const declaredExtras = peekSandboxExtraWritableDirs();
+  const dedupe = (dirs: string[]) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const dir of dirs) {
+      const key = dir.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(dir);
+    }
+    return out;
+  };
+  const allTargets = dedupe([dataDir, ...collectFolderWorkspaceRoots(), ...declaredExtras]);
+  const desiredKeys = new Set(allTargets.map((dir) => dir.toLowerCase()));
+  const stale = (record?.dirs ?? []).filter((dir) => !desiredKeys.has(dir.toLowerCase()));
+  let keptRecord = record?.dirs ?? [];
+  if (stale.length > 0) {
+    const restored = setIntegrityLabels(stale, "medium");
+    const restoredKeys = new Set(restored.labeled.map((dir) => dir.toLowerCase()));
+    keptRecord = keptRecord.filter((dir) => !restoredKeys.has(dir.toLowerCase()));
+    bootNote(
+      "sandboxExtraRestored",
+      `撤销 ${restored.labeled.length} 个不再声明的可写目录${restored.failed.length > 0 ? `,失败 ${restored.failed.length}` : ""}`,
+    );
+  }
+  const already = new Set(keptRecord.map((dir) => dir.toLowerCase()));
+  const targets = allTargets.filter((dir) => !already.has(dir.toLowerCase()));
   const labelOutcome =
     targets.length > 0
       ? setIntegrityLabels(targets, "low")
@@ -89,7 +117,7 @@ export function maybeRelaunchForRestrictedSandbox(): RestrictedLaunchOutcome {
   for (const failure of labelOutcome.failed) {
     bootNote("sandboxLabelFailed", `${failure.dir}: ${failure.error}`);
   }
-  const dirs = [...new Set([...(record?.dirs ?? []), ...labelOutcome.labeled])];
+  const dirs = dedupe([...keptRecord, ...labelOutcome.labeled]);
   if (dirs.length > 0) writeSandboxLabelRecord(dataDir, dirs);
 
   // dataDir 必须实测带 Low 标签——低完整性进程写不了自己的库,标不上就别降级

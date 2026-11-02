@@ -182,11 +182,12 @@ export function createRemoteBashOperations(target: SshWorkspaceTarget): BashOper
 export function createRemoteBashTool(
   target: SshWorkspaceTarget,
   cwd: string,
-  options: { tempFileDir?: string } = {},
+  options: { tempFileDir?: string; resumableOutput?: boolean } = {},
 ): WorkspaceToolDefinition<BashToolInput, unknown> {
   return createBashTool(cwd, {
     operations: createRemoteBashOperations(target),
     tempFileDir: options.tempFileDir,
+    resumableOutput: options.resumableOutput,
   }) as WorkspaceToolDefinition<BashToolInput, unknown>;
 }
 
@@ -198,7 +199,7 @@ export function buildRemoteWorkspaceTool(
   name: string,
   target: SshWorkspaceTarget,
   cwd: string,
-  options: { tempFileDir?: string } = {},
+  options: { tempFileDir?: string; resumableOutput?: boolean } = {},
 ): WorkspaceToolDefinition<unknown, unknown> {
   switch (name) {
     case "read":

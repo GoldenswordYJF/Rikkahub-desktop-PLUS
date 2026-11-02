@@ -9,6 +9,8 @@
 // 计时纪律:退避用 setTimeout 延迟,尊重调用方 AbortSignal——外层看门狗
 // (fetchWithTimeout 的 combined signal)一 abort,等待立即以 AbortError 收尾,
 // 不会把已取消的请求拖着重试。
+// 退避形状可由 delayFor 覆盖(消费方按 Retry-After 决定等待);不提供时仍是纯指数
+// 序列,既有调用方行为逐字不变。
 
 /** 可重试判定常量:408 请求超时 / 429 限流 / 5xx 服务端抖动。其余(400/401/403…)视为
  *  确定性错误,重试无意义,立即抛出。对齐 Android TTSProviderException.isRetryable。 */
@@ -46,6 +48,14 @@ export interface RetryOptions {
   signal?: AbortSignal;
   /** 自定义可重试判定。返回 false 立即抛出(不再退避)。默认 isRetryableHttpError。 */
   shouldRetry?: (err: unknown) => boolean;
+  /** 自定义本次退避时长(ms)。返回 null = 放弃重试并抛出当前错误(如 HTTP
+   *  Retry-After 要求等待超过 60s)。缺省 = baseDelayMs * 2^(failedAttempt-1)。 */
+  delayFor?: (info: {
+    nextAttempt: number;
+    failedAttempt: number;
+    baseDelayMs: number;
+    error: unknown;
+  }) => number | null;
   /** 每次重试前的回调(打日志/观测)。attempt 为即将进行的第几次(≥2),delayMs 为已等的退避。 */
   onRetry?: (info: { attempt: number; delayMs: number; error: unknown }) => void;
 }
@@ -79,6 +89,7 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, options:
     baseDelayMs = 500,
     signal,
     shouldRetry = isRetryableHttpError,
+    delayFor,
     onRetry,
   } = options;
   let attempt = 1;
@@ -91,10 +102,14 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, options:
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       if (signal?.aborted) throw abortError();
       if (!shouldRetry(err) || attempt >= maxAttempts) throw err;
-      const retryDelayMs = baseDelayMs * 2 ** (attempt - 1);
-      onRetry?.({ attempt: attempt + 1, delayMs: retryDelayMs, error: err });
+      const nextAttempt = attempt + 1;
+      const retryDelayMs = delayFor
+        ? delayFor({ nextAttempt, failedAttempt: attempt, baseDelayMs, error: err })
+        : baseDelayMs * 2 ** (attempt - 1);
+      if (retryDelayMs === null) throw err;
+      onRetry?.({ attempt: nextAttempt, delayMs: retryDelayMs, error: err });
       await delay(retryDelayMs, signal);
-      attempt += 1;
+      attempt = nextAttempt;
     }
   }
 }

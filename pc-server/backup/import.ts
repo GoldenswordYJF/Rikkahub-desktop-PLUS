@@ -80,6 +80,7 @@ export const PC_ONLY_SETTINGS_PRESERVED_ON_ANDROID_IMPORT = [
   "webServerJwtEnabled",
   "preferredPort",
   "sandboxRestricted",
+  "sandboxExtraWritableDirs",
   "workspaceLastPermissionPreset",
   "keybindings",
   "webPasswordHash",
@@ -101,6 +102,8 @@ export const PC_ONLY_SETTINGS_PRESERVED_ON_ANDROID_IMPORT = [
   "memoryExperimentSettings",
   "moodExperimentSettings",
   "subagent",
+  "workspaceTools",
+  "agentLoop",
   // 凭据与外部接入
   "sshDevices",
   "imAccess",

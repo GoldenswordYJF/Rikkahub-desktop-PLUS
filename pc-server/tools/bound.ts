@@ -8,6 +8,7 @@ import { memoryExperimentFeature } from "../memory/experiment/gate";
 import {
   openAiLocalTools as openAiLocalToolsCore,
   openAiMcpTools as openAiMcpToolsCore,
+  openAiPlanTool as openAiPlanToolCore,
   openAiSearchTools as openAiSearchToolsCore,
   openAiSkillTools as openAiSkillToolsCore,
   openAiSubagentTool as openAiSubagentToolCore,
@@ -33,12 +34,28 @@ export function openAiLocalTools(assistant: Assistant) {
 }
 
 export function openAiMcpTools(assistant: Assistant) {
-  return openAiMcpToolsCore(assistant, state.settings.mcpServers);
+  return openAiMcpToolsCore(assistant, state.settings.mcpServers, {
+    // S8:超长 MCP description 截断(保留开头摘要与关键说明);默认关=逐字透传。
+    descriptionCap: state.settings.workspaceTools?.mcpDescriptionCap === true,
+  });
 }
 
 /** 子智能体派遣工具(PC 专属):全局开关控制声明,不按助手细分(v1 裁决)。 */
 export function openAiSubagentTool() {
   return openAiSubagentToolCore(state.settings.subagent);
+}
+
+/** 计划工具 update_plan(PC 专属):开关落在 displaySetting.planPanel——
+ *  与工具行折叠、长文本粘贴同一族"PC 端显示项",随备份导出剥离,安卓侧永不见这个键。
+ *  默认开(「不写即开」,与 defaults.ts 同向);关掉只是不再向模型声明它,
+ *  历史消息里已有的计划 part 照常渲染成面板。
+ *  自主循环 S2:开启 agentLoop 才声明计划 v2 字段(goal/done_when/boundaries +
+ *  step 的 id/verify/evidence),关闭时 schema 与引入前逐字一致。 */
+export function openAiPlanTool() {
+  return openAiPlanToolCore(
+    state.settings.displaySetting?.planPanel !== false,
+    state.settings.agentLoop?.enabled === true,
+  );
 }
 
 /** 会话级函数工具全集（M1-4）：四家装配点（orchestrator ×4 + conversation-encoding）
@@ -55,5 +72,6 @@ export function conversationFunctionTools(assistant: Assistant, model?: Model | 
     ...openAiSkillTools(assistant),
     ...openAiMcpTools(assistant),
     ...openAiSubagentTool(),
+    ...openAiPlanTool(),
   ];
 }
