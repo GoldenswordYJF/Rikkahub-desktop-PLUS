@@ -134,9 +134,9 @@ async function main(): Promise<void> {
   // ---- 冒烟:先证明这个 exe 能用,再动目标 ----
   await probe(srcExe);
 
-  // ---- 备份目标已有的 exe ----
+  // ---- 备份目标已有的 exe（同尺寸说明本来就是同一版，重复备份只会堆垃圾） ----
   const targetExe = join(target, "rikkahub-pc.exe");
-  if (existsSync(targetExe)) {
+  if (existsSync(targetExe) && statSync(targetExe).size !== srcStat.size) {
     const backupDir = join(target, `backup-${stamp()}`);
     mkdirSync(backupDir, { recursive: true });
     copyFileSync(targetExe, join(backupDir, "rikkahub-pc.exe"));
@@ -144,7 +144,13 @@ async function main(): Promise<void> {
   }
 
   // ---- 成对搬运 ----
-  copyFileSync(srcExe, targetExe);
+  // 目标 exe 被运行中的 RikkaHub 占用时 copyFileSync 会抛 EBUSY/EPERM，
+  // 直接抛栈对用户没用——这里翻译成一句能照做的提示。
+  try {
+    copyFileSync(srcExe, targetExe);
+  } catch (err) {
+    fail(`覆盖 ${targetExe} 失败（多半还在运行）：先退出 RikkaHub.exe 再重跑。原始错误: ${String(err)}`);
+  }
   const targetUi = join(target, "web-ui", "build", "client");
   rmSync(targetUi, { recursive: true, force: true });
   mkdirSync(targetUi, { recursive: true });
