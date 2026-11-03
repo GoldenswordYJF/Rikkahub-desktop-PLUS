@@ -20,7 +20,7 @@
 //   clearMessageQueue(挂 deleteConversationsById 收口)清除。
 //   所有 mutation 由调用方负责随后 broadcastQueueState(SSE 快照直通,队列自身不发帧)。
 
-import type { MessagePart } from "../foundation/types";
+import type { JsonValue, MessagePart } from "../foundation/types";
 import { id } from "../foundation/utils";
 import { textFromParts } from "../foundation/utils";
 import { clearSteeringChannel } from "./steering-channel";
@@ -32,6 +32,9 @@ export interface QueuedGeneration {
   parts: MessagePart[];
   createdAt: number;
   waitingReply?: boolean;
+  /** 生命周期 L3:入队方附带的注解(如 scheduled/scheduleId),派发时随 USER 消息落库。
+   *  与 parts 同做快照,防止调用方后续修改。 */
+  annotations?: JsonValue[];
 }
 
 interface QueueState {
@@ -105,8 +108,20 @@ function ensureQueue(conversationId: string): QueueState {
 }
 
 /** 入队一条待生成。parts 取不可变快照,防调用方后续改草稿污染队列(对齐 APP toList() 快照纪律)。 */
-export function enqueueMessage(conversationId: string, parts: MessagePart[], opts?: { waitingReply?: boolean }): QueuedGeneration {
-  const item: QueuedGeneration = { id: id(), parts: parts.map((p) => ({ ...p })), createdAt: Date.now(), waitingReply: opts?.waitingReply };
+export function enqueueMessage(
+  conversationId: string,
+  parts: MessagePart[],
+  opts?: { waitingReply?: boolean; annotations?: JsonValue[] },
+): QueuedGeneration {
+  const item: QueuedGeneration = {
+    id: id(),
+    parts: parts.map((p) => ({ ...p })),
+    createdAt: Date.now(),
+    waitingReply: opts?.waitingReply,
+    ...(opts?.annotations?.length
+      ? { annotations: opts.annotations.map((entry) => structuredClone(entry)) }
+      : {}),
+  };
   ensureQueue(conversationId).items.push(item);
   return item;
 }

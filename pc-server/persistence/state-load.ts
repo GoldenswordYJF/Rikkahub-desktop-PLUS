@@ -237,11 +237,6 @@ export function normalizeState(input: Partial<State>): State {
   // 记忆场景模型（去重/整理共用）:老 state 无此键 → 空串（未配置）。
   if (typeof normalized.settings.memoryModelId !== "string") normalized.settings.memoryModelId = "";
   normalized.settings.displaySetting = { ...defaults.displaySetting, ...(normalized.settings.displaySetting ?? {}) };
-  // 桌面伴侣形象：帕秋莉已下架，老 state 里残留的其它 id 归一到在架那只，
-  // 免得设置页读到一张不存在的皮肤（前端 normalizeCompanionSkin 也兜同一件事）。
-  if (normalized.settings.displaySetting.companionSkin !== "deepy") {
-    normalized.settings.displaySetting.companionSkin = "deepy";
-  }
   // 特性 C：记忆向量设置的字段级规范化（老 state 无此键 → 默认关闭；非法数值逐项夹取）。
   normalized.settings.memoryVectorSettings = normalizeMemoryVectorSettings(
     (parsedSettings as unknown as Record<string, unknown>).memoryVectorSettings,

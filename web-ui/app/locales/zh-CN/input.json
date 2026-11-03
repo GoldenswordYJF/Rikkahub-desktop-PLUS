@@ -203,18 +203,6 @@
     "sandbox_mechanism_container": "容器挂载表",
     "sandbox_mechanism_none": "无"
   },
-  "companion": {
-    "aria": "{{name}}：点一下互动，按住拖动换位置",
-    "deepy": {
-      "name": "大肥鱼",
-      "poke_1": "咕噜噜。",
-      "poke_2": "大肥鱼在听。",
-      "poke_3": "……再游一圈。",
-      "poke_4": "泡泡吐完了，继续。",
-      "attention": "有人喊你确认一下。",
-      "compacting": "把上下文吞进去……"
-    }
-  },
   "integrations": {
     "title": "MCP 与拓展",
     "description": "为当前助手选择 MCP 工具与拓展能力",

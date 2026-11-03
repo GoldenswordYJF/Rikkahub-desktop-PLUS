@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Conversation, Message, MessageNode } from "../foundation/types";
-import { findPlanContext, latestPlan } from "./plan-context";
+import { findPlanContext, latestPlan, runResumeTarget } from "./plan-context";
 import { PLAN_TOOL_NAME, toPlanSnapshot, type Plan } from "./plan";
 
 function message(role: Message["role"], parts: Message["parts"]): Message {
@@ -171,5 +171,59 @@ describe("latestPlan(完成校验的当前 run 计划)", () => {
       node([message("ASSISTANT", [])]),
     ]);
     expect(latestPlan(conv)?.goal).toBe("真目标");
+  });
+
+  test("run_resume 恢复消息不算新 run:旧计划仍可读、仍是合并基线且目标锁定", () => {
+    const resumeUser = message("USER", []);
+    resumeUser.annotations.push({ type: "run_resume", runId: "run-old" });
+    const conv = conversation([
+      node([message("USER", [])]),
+      node([message("ASSISTANT", [planPart("tc1", planInput)])]),
+      node([resumeUser]),
+      node([message("ASSISTANT", [])]),
+    ]);
+    // latestPlan:完成校验仍认旧计划
+    expect(latestPlan(conv)?.goal).toBe("真目标");
+    // findPlanContext:旧计划仍是合并基线,目标三件套不允许改写(恢复不是新任务)
+    const context = findPlanContext(conv);
+    expect(context.previous?.goal).toBe("真目标");
+    expect(context.allowGoalChange).toBe(false);
+  });
+
+  test("run_resume 之后的普通用户消息仍切边界:新任务不继承旧计划", () => {
+    const resumeUser = message("USER", []);
+    resumeUser.annotations.push({ type: "run_resume", runId: "run-old" });
+    const conv = conversation([
+      node([message("USER", [])]),
+      node([message("ASSISTANT", [planPart("tc1", planInput)])]),
+      node([resumeUser]),
+      node([message("ASSISTANT", [])]),
+      node([message("USER", [])]),
+    ]);
+    expect(latestPlan(conv)).toBeNull();
+    expect(findPlanContext(conv)).toEqual({ previous: null, allowGoalChange: true });
+  });
+});
+
+describe("runResumeTarget(触发生成的恢复消息识别)", () => {
+  test("最近 USER 是恢复消息:返回目标 runId;普通/缺注解/缺 runId 返回 null", () => {
+    const resumeUser = message("USER", []);
+    resumeUser.annotations.push({ type: "run_resume", runId: "run-old" });
+    const conv = conversation([
+      node([message("USER", [])]),
+      node([message("ASSISTANT", [])]),
+      node([resumeUser]),
+      node([message("ASSISTANT", [])]), // 新生成的助手节点在尾部,不影响识别
+    ]);
+    expect(runResumeTarget(conv)).toBe("run-old");
+
+    expect(runResumeTarget(conversation([node([message("USER", [])])]))).toBeNull();
+    const noRunId = message("USER", []);
+    noRunId.annotations.push({ type: "run_resume" });
+    expect(runResumeTarget(conversation([node([noRunId])]))).toBeNull();
+    // 最近的 USER 是普通消息:即使更早有恢复消息也不认
+    expect(
+      runResumeTarget(conversation([node([resumeUser]), node([message("USER", [])])])),
+    ).toBeNull();
   });
 });

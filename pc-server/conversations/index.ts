@@ -759,6 +759,20 @@ export function resetConversationsDbTo(conversations: Conversation[], workspaces
     db.exec("DELETE FROM pc_conversation");
     clearAllFts(db);
     migrateConversationsIntoDb(db, conversations);
+    // 生命周期 L3:全量重灌后清理指向已不存在会话的调度——孤儿调度永远不会投递,
+    // 留着只是垃圾(运行记录不同:它是历史证据,保留)。旧库可能没有此表,失败不阻断导入。
+    try {
+      const hasScheduleTable = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pc_task_schedule'")
+        .get();
+      if (hasScheduleTable) {
+        db.exec(
+          "DELETE FROM pc_task_schedule WHERE conversation_id NOT IN (SELECT id FROM pc_conversation)",
+        );
+      }
+    } catch {
+      // 忽略:调度表缺失/结构异常不应让整份备份导入失败。
+    }
     if (workspaces) {
       db.exec(`CREATE TABLE IF NOT EXISTS pc_workspace (
         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, root TEXT NOT NULL DEFAULT '',

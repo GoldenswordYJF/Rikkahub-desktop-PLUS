@@ -81,7 +81,6 @@ const PAGE_KEYWORDS: Partial<Record<SettingsPageKey, string>> = {
   "data": "backup",
   "connectivity/server": "web_service",
   "connectivity/im": "im",
-  "experiments/companion": "companion",
   "experiments/agent-bot": "agent_bot",
   "stats/logs": "logs",
   donate: "donate",
@@ -377,17 +376,8 @@ const ROW_ENTRIES: readonly SettingsSearchEntry[] = [
   row("experiments/agent-bot", "experiments.agent_bot.max_replans", { keywords: "agent_bot" }),
   row("experiments/agent-bot", "experiments.agent_bot.stall_repeat_limit", { keywords: "agent_bot" }),
   row("experiments/agent-bot", "experiments.agent_bot.same_error_limit", { keywords: "agent_bot" }),
-
-  // 实验功能（桌面伴侣）
-  row("experiments/companion", "experiments.companion.notice_title"),
-  row("experiments/companion", "experiments.companion.master_title"),
-  row("experiments/companion", "experiments.companion.enable", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.bubbles", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.skin_title", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.skin_deepy", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.size_title", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.size_row", { keywords: "companion" }),
-  row("experiments/companion", "experiments.companion.pos_title", { keywords: "companion" }),
+  row("experiments/agent-bot", "experiments.agent_bot.scheduling", { keywords: "agent_bot" }),
+  row("experiments/agent-bot", "experiments.agent_bot.audit_title", { keywords: "agent_bot" }),
 
   // 数据管理
   row("data", "data.backup_title"),

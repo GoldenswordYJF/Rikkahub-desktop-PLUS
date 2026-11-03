@@ -48,3 +48,10 @@ export type {
   RunPlanUnavailableReason,
   RunProjectionDto,
 } from "@server/agent-loop/types";
+// 生命周期 L2:恢复判定 DTO(服务端算,前端只展示,不自行推断可恢复性)。
+// 与其余 run DTO 同源:必须从纯类型模块引入,否则会把 bun 运行时依赖带进前端图。
+export type {
+  AgentRunRecoveryDto,
+  AgentRunResumeMode,
+  RunCheckpointDto,
+} from "@server/agent-loop/types";

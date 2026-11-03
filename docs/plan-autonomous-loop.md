@@ -4,6 +4,7 @@
 > 进度：S1 ✅ · S2 ✅ · S3 ✅ · S4 ✅ · S5 ✅。
 > 范围：只补「自主循环」这一项。任务生命周期（跨重启恢复、cron 调度）、审计、任务图 DAG 执行器均不在本文范围，但本文 S1 的运行记录是它们的地基。
 > 关联：运行记录的只读观测层（历史 run、事件分页、计划证据、权限边界复盘、审批复盘）见 `docs/plan-agentbot-observability.md`，O1–O5 已完成；观测层只消费本文 S1–S5 的 run/plan 语义，不改变循环、审批与权限判定。
+> 关联：任务生命周期（长跑 checkpoint、启动收敛、显式恢复、耐久调度、审计导出）见 `docs/plan-task-lifecycle.md`；该计划复用本文运行记录与计划边界，仍不引入自动审批或崩溃后自动续跑。
 > 参照：`reference/_dl/ecc/skills/loop-design-check`（目标可判定 / plan-build-judge / 五类失败模式 / 防跑飞）、`continuous-agent-loop`（质量门与恢复控制）、`agentic-loop-upgrade`（可观测状态机、检查点、计划状态字段）。orchestrator-v4 仅参考其"自适应超时 / 用户随时打断"语义，不引入其派发模型。
 
 ## 0. 一句话结论

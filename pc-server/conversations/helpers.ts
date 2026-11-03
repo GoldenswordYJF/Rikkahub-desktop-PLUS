@@ -5,7 +5,8 @@ import type { Assistant, Conversation, JsonValue, Message, MessageNode, MessageP
 import { estimateTokens, getStringArray, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { broadcastList, dropConversationSse } from "../api/sse";
-import { deletePcConversations, flushConvDirtyNow, getConversation, persistConversation, selectedConversationMessages } from "./index";
+import { deletePcConversations, flushConvDirtyNow, getConversation, getConversationsDb, persistConversation, selectedConversationMessages } from "./index";
+import { deleteSchedulesForConversations } from "../agent-loop/schedule-store";
 import { registerConversation, removeConversations } from "./working-set";
 import { abortGeneration, generating } from "./generation-state";
 import { clearMessageQueue } from "./message-queue";
@@ -40,6 +41,15 @@ export function deleteConversationsById(ids: Set<string>) {
     dropConversationSse(conversationId);
     // 会话删除即清其发送队列(纯内存态,孤儿队列只是泄漏,顺手清)。
     clearMessageQueue(conversationId);
+  }
+  // 生命周期 L3:显式删除会话的调度记录——不依赖 ON DELETE CASCADE
+  // (本仓不假设 foreign_keys pragma 恒开启)。
+  try {
+    const db = getConversationsDb();
+    if (db) deleteSchedulesForConversations(db, ids);
+  } catch (error) {
+    // 旧库无此表等情况不该阻断删除。
+    console.error("[scheduler] 删除调度记录失败(不影响会话删除):", error);
   }
   // P7:引擎会话状态(压缩记录)在会话行内(engine_compactions 列),随行删除天然级联,
   // 无文件生命周期可管——P2 的 jsonl 收集/删除逻辑随层退役。

@@ -183,7 +183,10 @@
         "continue": "继续",
         "change_goal": "改目标",
         "continue_message": "继续",
-        "send_failed": "继续失败"
+        "send_failed": "继续失败",
+        "resume": "恢复运行",
+        "resume_hint": "进程重启前中断的任务(旧计划与证据会继续沿用)",
+        "resume_failed": "恢复失败"
       },
       "status": {
         "running": "运行中",
@@ -244,6 +247,29 @@
           "mcp_tool_requires_approval": "MCP 工具要求审批"
         }
       }
+    },
+    "agent_schedules": {
+      "title": "定时任务",
+      "empty": "没有定时任务",
+      "all_disabled": "全部已停用",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "once_at": "定时 {{time}}",
+      "every": "每 {{minutes}} 分钟",
+      "next_run": "下次 {{time}}",
+      "last_run": "上次 {{time}}",
+      "goal_placeholder": "到点后要执行的任务",
+      "kind_interval": "固定间隔",
+      "kind_once": "只跑一次",
+      "minutes_label": "间隔(分钟)",
+      "create": "新建",
+      "enable": "启用",
+      "disable": "停用",
+      "delete": "删除",
+      "need_goal": "先写任务目标",
+      "need_time": "时间或间隔不合法",
+      "create_failed": "创建定时任务失败",
+      "delete_failed": "删除定时任务失败"
     },
     "translate": {
       "dialog_title": "选择翻译语言",

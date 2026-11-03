@@ -44,8 +44,38 @@ function v2Plan(
   });
 }
 
-let callSeq = 0;
-function obs(
+function graphPlan(
+  steps: Array<{
+    id: string;
+    status: PlanStepStatus;
+    evidence?: string[];
+    depends_on?: string[];
+    attempts?: number;
+    max_attempts?: number;
+    last_error?: string;
+  }>,
+): Plan {
+  return normalizePlan(
+    {
+      title: "graph plan",
+      goal: "finish the graph",
+      done_when: ["all steps settled"],
+      steps: steps.map((step) => ({
+        id: step.id,
+        content: `step ${step.id}`,
+        status: step.status,
+        evidence: step.evidence ?? [],
+        depends_on: step.depends_on,
+        attempts: step.attempts,
+        max_attempts: step.max_attempts,
+        last_error: step.last_error,
+      })),
+    },
+    { graph: true, trusted: true },
+  );
+}
+
+let callSeq = 0;function obs(
   toolName: string,
   args: unknown,
   outputText: string,
@@ -281,6 +311,79 @@ describe("判定表 — 最终轮完成校验(规则 1/2)", () => {
     const { controller, state } = harness(v2Plan([{ id: "s1", status: "pending" }], "整理周报"));
     controller.evaluateToolRound([obs("read", { path: "a" }, "ok")]);
     expect(state.goals.at(-1)).toBe("整理周报");
+  });
+});
+
+describe("判定表 — 任务图 v3", () => {
+  test("halts awaiting_user when a step exhausts its retry budget", () => {
+    const { controller, state } = harness(
+      graphPlan([
+        {
+          id: "s1",
+          status: "failed",
+          attempts: 3,
+          max_attempts: 3,
+          last_error: "timeout",
+        },
+      ]),
+    );
+    expect(controller.evaluateFinal()).toEqual({
+      action: "halt",
+      status: "awaiting_user",
+      reason: "任务图步骤重试预算耗尽:s1",
+    });
+    expect(state.stalls.map((stall) => stall.kind)).toEqual(["exhausted"]);
+  });
+
+  test("injects retryable step id and attempt budget", () => {
+    const { controller } = harness(
+      graphPlan([
+        { id: "s1", status: "failed", attempts: 1, max_attempts: 3, last_error: "timeout" },
+      ]),
+    );
+    const decision = controller.evaluateFinal();
+    expect(decision.action).toBe("inject");
+    expect(decision.action === "inject" ? decision.text : "").toContain("s1 (attempt 1/3)");
+  });
+
+  test("does not finish while blocked steps remain, and stalls if nothing changes", () => {
+    const { controller, state } = harness(
+      graphPlan([
+        { id: "s1", status: "completed" },
+        { id: "s2", status: "pending", depends_on: ["s1"] },
+      ]),
+    );
+    const first = controller.evaluateFinal();
+    expect(first.action).toBe("inject");
+    expect(first.action === "inject" ? first.text : "").toContain("s2 needs s1");
+    const second = controller.evaluateFinal();
+    expect(second).toMatchObject({ action: "halt", status: "stalled" });
+    expect(state.stalls.map((stall) => stall.kind)).toEqual(["unsettled"]);
+  });
+
+  test("does not unblock dependents of unverified completions", () => {
+    const { controller } = harness(
+      graphPlan([
+        { id: "s1", status: "completed" },
+        { id: "s2", status: "pending", depends_on: ["s1"] },
+      ]),
+    );
+    const decision = controller.evaluateFinal();
+    expect(decision.action).toBe("inject");
+    const text = decision.action === "inject" ? decision.text : "";
+    expect(text).toContain("Blocked steps");
+    expect(text).toContain("without tool evidence: s1");
+  });
+
+  test("allows completion only when every non-cancelled step is verified", () => {
+    const { controller } = harness(
+      graphPlan([
+        { id: "s1", status: "completed", evidence: ["tc-1"] },
+        { id: "s2", status: "cancelled" },
+        { id: "s3", status: "completed", evidence: ["tc-2"], depends_on: ["s1"] },
+      ]),
+    );
+    expect(controller.evaluateFinal()).toEqual({ action: "continue" });
   });
 });
 

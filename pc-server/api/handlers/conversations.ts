@@ -34,9 +34,9 @@ import { bumpAnalyticsMsgCount } from "../../app-config/analytics";
 import { DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
 import { attachOcrToImageParts, compressConversation, conversationModelIdFor, englishLanguageName, fetchAuxiliaryText, generateTitleForConversation, isQwenMtModel, markOcrPendingParts, modelExists, resolveFastModelId } from "../../conversations/auxiliary";
 import { compactEngineConversation, dispatchMessageQueue, generateAnswer, resolveEngineForConversation } from "../../conversations/orchestrator";
-import { deleteConversationsById, ensureConversation, findAssistant, finishInterruptedPendingToolsInConversation, hasPendingToolApproval } from "../../conversations/helpers";
+import { deleteConversationsById, ensureConversation, findAssistant, finishInterruptedPendingToolsInConversation, hasPendingToolApproval, hasResumableToolParts } from "../../conversations/helpers";
 import { forkConversationTitle } from "../../conversations/fork-title";
-import { cancelWaitingQueuedMessages, editQueuedMessage, enqueueMessage, holdMessageQueue, pauseMessageQueue, releaseMessageQueueHold, removeQueuedMessage, resumeMessageQueue, waitForQueuedReply } from "../../conversations/message-queue";
+import { cancelWaitingQueuedMessages, editQueuedMessage, enqueueMessage, hasQueuedMessages, holdMessageQueue, pauseMessageQueue, releaseMessageQueueHold, removeQueuedMessage, resumeMessageQueue, waitForQueuedReply } from "../../conversations/message-queue";
 import { pushSteeringMessage, removeSteeringMessage } from "../../conversations/steering-channel";
 import { abortGeneration, awaitingApproval, compressing, generating } from "../../conversations/generation-state";
 import { getWorkspace } from "../../workspace";
@@ -44,10 +44,26 @@ import { resolveToolApproval } from "../../inference-engine/approval-gate";
 import { finishToolParts, stripLoadingPlaceholder } from "../../inference-engine/parts";
 import { listConversationFiles } from "../../conversations/conversation-files";
 import { scheduleCompactionCandidates } from "../../memory/experiment/compaction-candidates";
-import { getRunForConversation, getRunSnapshot, listRunEventPage, listRuns } from "../../agent-loop/run-store";
+import { getRunForConversation, getRunSnapshot, listRunEventPage, listRunEventsAfter, listRuns } from "../../agent-loop/run-store";
 import { getRunPlanProjection } from "../../agent-loop/plan-projection";
 import type { AgentRunEventPageDto, AgentRunListDto, AgentRunPushDto, RunProjectionDto } from "../../agent-loop/types";
 import { recordApprovalDecision } from "../../agent-loop/run-tracker";
+import { getRunRecovery, type AgentRunRecoveryDto } from "../../agent-loop/run-recovery";
+import { createSchedule, deleteSchedule, listSchedules, updateSchedule } from "../../agent-loop/schedule-store";
+
+/** 生命周期 L2:恢复消息的模型面固定文本(用户可见气泡同文案)。 */
+const RUN_RESUME_PROMPT =
+  "Resume the interrupted task. Reuse the existing plan and tool evidence; do not repeat completed steps or replay denied tools.";
+
+/** 会话尾部助手消息是否还有待执行的工具卡(suspended run 的有效暂停依据)。
+ *  进程重启后内存审批表为空,消息流才是权威事实。 */
+function lastAssistantHasResumableTools(conversation: Conversation): boolean {
+  const lastNode = conversation.messages[conversation.messages.length - 1];
+  if (!lastNode) return false;
+  const lastMessage = lastNode.messages[lastNode.selectIndex] ?? lastNode.messages[0];
+  if (!lastMessage || lastMessage.role !== "ASSISTANT") return false;
+  return hasResumableToolParts(lastMessage);
+}
 
 export async function handleConversationRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   // 列表失效事件已并入 /api/events 通道(invalidate 事件);会话详情流保持独立端点
@@ -219,6 +235,146 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     const run = getRunForConversation(conversation.id, conversationAgentRunProjection[2]);
     if (!run) return error("Agent run not found", 404);
     return json(getRunPlanProjection(conversation, run) satisfies RunProjectionDto);
+  }
+
+  // 生命周期 L4:单 run JSONL 导出(审计)。首行 run、事件按 seq 升序逐页流式、末行
+  // projection;不含消息/工具正文与密钥。跨会话 runId 一律 404,不用空导出掩盖越权。
+  const conversationAgentRunExport = path.match(/^conversations\/([^/]+)\/agent-runs\/([^/]+)\/export$/);
+  if (conversationAgentRunExport && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRunExport[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    const run = getRunForConversation(conversation.id, conversationAgentRunExport[2]);
+    if (!run) return error("Agent run not found", 404);
+    const projection = getRunPlanProjection(conversation, run);
+    const encoder = new TextEncoder();
+    const pageSize = 200;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`${JSON.stringify({ type: "run", data: run })}\n`));
+        let afterSeq = 0;
+        for (;;) {
+          const events = listRunEventsAfter(run.id, afterSeq, pageSize);
+          if (events.length === 0) break;
+          for (const event of events) {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "event", data: event })}\n`));
+          }
+          afterSeq = events[events.length - 1].seq;
+          if (events.length < pageSize) break;
+        }
+        controller.enqueue(encoder.encode(`${JSON.stringify({ type: "projection", data: projection })}\n`));
+        controller.close();
+      },
+    });
+    // 文件名只含短 id 与日期,不含用户目标原文(§5.3)。
+    const filename = `conv-${conversation.id.slice(0, 8)}-run-${run.id.slice(0, 8)}-${new Date()
+      .toISOString()
+      .slice(0, 10)}.ndjson`;
+    return new Response(body, {
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  // 生命周期 L2:恢复判定(只读)。前端据此决定是否显示「恢复运行」;前端不得自行推断。
+  const conversationAgentRunRecovery = path.match(/^conversations\/([^/]+)\/agent-runs\/([^/]+)\/recovery$/);
+  if (conversationAgentRunRecovery && request.method === "GET") {
+    const conversation = getConversation(conversationAgentRunRecovery[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    const recovery = getRunRecovery(conversation.id, conversationAgentRunRecovery[2], {
+      busy: generating.has(conversation.id) || hasQueuedMessages(conversation.id),
+      hasPendingApproval: lastAssistantHasResumableTools(conversation),
+    });
+    if (!recovery) return error("Agent run not found", 404);
+    // 总开关关闭时不宣称可恢复:否则面板会显示一个点了必 409 的按钮。
+    // 判定仍由服务端给,前端不做第二套规则。
+    if (recovery.mode === "new_run" && state.settings.agentLoop?.enabled !== true) {
+      return json({ ...recovery, mode: "none", reason: "feature_disabled" } satisfies AgentRunRecoveryDto);
+    }
+    return json(recovery satisfies AgentRunRecoveryDto);
+  }
+
+  // 生命周期 L2:用户显式恢复中断 run。仅接受 new_run——suspended 必须走原审批端点,
+  // 不允许从本接口绕过审批。旧 run 只读;新 run 由生成入口 beginAgentRun 建并链接。
+  const conversationAgentRunResume = path.match(/^conversations\/([^/]+)\/agent-runs\/([^/]+)\/resume$/);
+  if (conversationAgentRunResume && request.method === "POST") {
+    const conversation = getConversation(conversationAgentRunResume[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    // 总开关关闭时不产生恢复写入(与调度/运行记录同口径;GET 判定保持只读可查)。
+    if (state.settings.agentLoop?.enabled !== true) {
+      return error("Run cannot be resumed: feature_disabled", 409, "run_not_resumable");
+    }
+    if (compressing.has(conversation.id)) {
+      return error("已有压缩正在进行，请稍候", 409, "compress_in_progress");
+    }
+    const recovery = getRunRecovery(conversation.id, conversationAgentRunResume[2], {
+      busy: generating.has(conversation.id) || hasQueuedMessages(conversation.id),
+      hasPendingApproval: lastAssistantHasResumableTools(conversation),
+    });
+    if (!recovery) return error("Agent run not found", 404);
+    if (recovery.mode !== "new_run") {
+      // 判定与点火之间仍有并发窗口:生成入口同步占位 generating,第二击必落 busy。
+      return error(
+        recovery.reason ? `Run cannot be resumed: ${recovery.reason}` : `Run is ${recovery.mode}`,
+        409,
+        "run_not_resumable",
+      );
+    }
+    checkoutConversation(conversation.id);
+    try {
+      finishInterruptedPendingToolsInConversation(conversation);
+      releaseMessageQueueHold(conversation.id);
+      const userMessage = message("USER", [{ type: "text", text: RUN_RESUME_PROMPT }]);
+      userMessage.annotations.push({ type: "run_resume", runId: recovery.runId });
+      conversation.messages.push({ id: id(), messages: [userMessage], selectIndex: 0 });
+      conversation.updateAt = Date.now();
+      persistConversation(conversation);
+      broadcastConversation(conversation);
+    } finally {
+      releaseConversation(conversation.id);
+    }
+    // 与 messages POST 同一生成入口:不新增第二生成路径。generateAnswer 入口同步占位
+    // generating 并先中止旧流,调用方无需等待生成完成。
+    void generateAnswer(conversation);
+    return json({ status: "resumed", resumedFromRunId: recovery.runId }, { status: 202 });
+  }
+
+  // 生命周期 L3:任务调度 CRUD(记录与投递解耦:开关关闭时只停投递,不删记录)。
+  const conversationTaskSchedules = path.match(/^conversations\/([^/]+)\/task-schedules$/);
+  if (conversationTaskSchedules) {
+    const conversation = getConversation(conversationTaskSchedules[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    if (request.method === "GET") {
+      return json({ schedules: listSchedules(conversation.id) });
+    }
+    if (request.method === "POST") {
+      const body = await readJson<Record<string, unknown>>(request);
+      const created = createSchedule(conversation.id, body ?? {});
+      if (!created.ok) {
+        return error(created.error, created.code === "schedule_limit" ? 429 : 400, created.code);
+      }
+      return json({ schedule: created.schedule }, { status: 201 });
+    }
+  }
+  const conversationTaskSchedule = path.match(/^conversations\/([^/]+)\/task-schedules\/([^/]+)$/);
+  if (conversationTaskSchedule) {
+    const conversation = getConversation(conversationTaskSchedule[1]);
+    if (!conversation) return error("Conversation not found", 404);
+    const scheduleId = conversationTaskSchedule[2];
+    if (request.method === "PATCH") {
+      const body = await readJson<Record<string, unknown>>(request);
+      const updated = updateSchedule(conversation.id, scheduleId, body ?? {});
+      if (!updated.ok) {
+        return error(updated.error, updated.error === "not_found" ? 404 : 400);
+      }
+      return json({ schedule: updated.schedule });
+    }
+    if (request.method === "DELETE") {
+      if (!deleteSchedule(conversation.id, scheduleId)) return error("Schedule not found", 404);
+      return new Response(null, { status: 204 });
+    }
   }
 
   const conversationRoute = path.match(/^conversations\/([^/]+)(?:\/(.*))?$/);

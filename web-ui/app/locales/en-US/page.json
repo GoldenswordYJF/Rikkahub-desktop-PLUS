@@ -183,7 +183,10 @@
         "continue": "Continue",
         "change_goal": "Change goal",
         "continue_message": "Continue",
-        "send_failed": "Could not continue the run"
+        "send_failed": "Could not continue the run",
+        "resume": "Resume run",
+        "resume_hint": "Interrupted by a process restart (keeps the existing plan and evidence)",
+        "resume_failed": "Could not resume the run"
       },
       "status": {
         "running": "Running",
@@ -244,6 +247,29 @@
           "mcp_tool_requires_approval": "MCP tool requires approval"
         }
       }
+    },
+    "agent_schedules": {
+      "title": "Scheduled tasks",
+      "empty": "No scheduled tasks",
+      "all_disabled": "All disabled",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "once_at": "at {{time}}",
+      "every": "every {{minutes}} min",
+      "next_run": "next {{time}}",
+      "last_run": "last {{time}}",
+      "goal_placeholder": "What should run when the time comes",
+      "kind_interval": "Interval",
+      "kind_once": "Once",
+      "minutes_label": "Every (min)",
+      "create": "Add",
+      "enable": "Enable",
+      "disable": "Disable",
+      "delete": "Delete",
+      "need_goal": "Write the task goal first",
+      "need_time": "Time or interval is invalid",
+      "create_failed": "Could not create the scheduled task",
+      "delete_failed": "Could not delete the scheduled task"
     },
     "translate": {
       "dialog_title": "Select translation language",

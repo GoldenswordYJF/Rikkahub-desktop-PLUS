@@ -190,6 +190,64 @@ describe("计划来源:最后一条 update_plan 事件 + 精确 toolCallId", () 
     expect(projection.plan.toolLocations["tc-work"]).toEqual({ messageId: "a1-m", visible: true });
   });
 
+  test("v3 快照投影保留依赖与预算", () => {
+    const nodes = [
+      userNode("task-v3"),
+      assistantNode("a1-v3", [
+        planPart(
+          "tc-v3",
+          planInput("图", [
+            { content: "导出", status: "completed", evidence: ["tc-out"] },
+            { content: "导入", status: "pending" },
+          ]),
+          {
+            title: "图",
+            goal: "完成迁移",
+            done_when: [],
+            boundaries: [],
+            steps: [
+              {
+                id: "s1",
+                content: "导出",
+                status: "completed",
+                verify: "",
+                evidence: ["tc-out"],
+                attempts: 0,
+                last_error: null,
+                depends_on: [],
+                max_attempts: 2,
+              },
+              {
+                id: "s2",
+                content: "导入",
+                status: "pending",
+                verify: "",
+                evidence: [],
+                attempts: 1,
+                last_error: "timeout",
+                depends_on: ["s1"],
+                max_attempts: 3,
+              },
+            ],
+          },
+        ),
+      ]),
+    ];
+    const conv = conversation("proj-v3", nodes);
+    register(conv);
+    const run = runFor(conv.id, "run-v3", "a1-v3");
+    planEvent(run.id, "tc-v3");
+
+    const projection = getRunPlanProjection(conv, run);
+    expect(projection.plan.v2).toBe(true);
+    expect(projection.plan.plan?.steps[1]).toMatchObject({
+      depends_on: ["s1"],
+      max_attempts: 3,
+      attempts: 1,
+      last_error: "timeout",
+    });
+  });
+
   test("工具卡在非选中分支:计划仍可还原,定位如实标 visible=false", () => {
     const selected = message("a1-m0", "ASSISTANT", [{ type: "text", text: "另一分支" }]);
     const other = message("a1-m1", "ASSISTANT", [

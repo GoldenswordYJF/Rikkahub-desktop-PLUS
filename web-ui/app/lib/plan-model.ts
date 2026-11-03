@@ -89,7 +89,7 @@ export interface RunPlanView {
 export function planViewFromProjection(projection: RunProjectionDto | null): RunPlanView | null {
   if (!projection) return null;
   const payload = projection.plan;
-  const plan = payload.plan ? normalizePlan(payload.plan, { trusted: true }) : null;
+  const plan = payload.plan ? normalizePlan(payload.plan, { trusted: true, graph: true }) : null;
   return {
     plan: plan && plan.steps.length > 0 ? plan : null,
     v2: payload.v2 === true,

@@ -319,15 +319,15 @@ Optional model_id picks the model for a task (e.g. a cheaper model for simple su
 
 /** update_plan 声明(PC 专属,默认开):与 subagent 同一门控语义——开关关闭直接返回
  *  空数组,模型面看不到这个工具,历史里的计划 part 仍能照常渲染(面板读消息流,不读声明)。 */
-export function openAiPlanTool(enabled: boolean, v2 = false) {
+export function openAiPlanTool(enabled: boolean, v2 = false, graph = false) {
   if (!enabled) return [];
   return [
     {
       type: "function" as const,
       function: {
         name: PLAN_TOOL_NAME,
-        description: planToolDescription(v2),
-        parameters: planToolParameters(v2),
+        description: planToolDescription(v2, graph),
+        parameters: planToolParameters(v2, graph),
       },
     },
   ];

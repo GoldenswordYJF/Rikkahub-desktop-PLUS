@@ -107,17 +107,6 @@ export function defaultSettings(): Settings {
       // User-resizable chat input height in px (null = default min). Persisted across
       // restarts via displaySetting. PC-only — stripped before syncing to Android.
       chatInputHeight: null,
-      // 实验：输入框旁的桌面伴侣（PC-only，导出安卓时剥离）。默认关闭，开启后只在
-      // 足够宽的窗格左侧出现，不改变输入框布局。
-      showCompanion: false,
-      // 帕秋莉已下线（像素形象不好看），只留大肥鱼一只。老 state.json 里残留的
-      // "patchouli" 由前端 normalizeCompanionSkin 兜回这里，不做数据迁移。
-      companionSkin: "deepy",
-      companionBubbles: true,
-      // 像素图只能整数倍放大(2=标准),位移是相对默认锚点(输入列左下)的像素增量,
-      // 老 state 缺这两个字段时前端各自回落到 2 与 {0,0}。
-      companionScale: 2,
-      companionPos: { x: 0, y: 0 },
     },
     enableWebSearch: false,
     favoriteModels: [],

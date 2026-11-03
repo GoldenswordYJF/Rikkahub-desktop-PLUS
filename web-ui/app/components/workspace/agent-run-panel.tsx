@@ -24,6 +24,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Route,
   Shield,
   ShieldCheck,
@@ -40,7 +41,7 @@ import {
   useConversationAgentRun,
   useConversationStore,
 } from "~/stores/conversation-store";
-import { agentRunEpoch, fetchAgentRunEventPage, useAgentRunEpoch } from "~/stores/agent-run-sync";
+import { agentRunEpoch, fetchAgentRunEventPage, postAgentRunResume, useAgentRunEpoch } from "~/stores/agent-run-sync";
 import {
   filterAgentRunEvents,
   type AgentRunEventFilter,
@@ -48,6 +49,7 @@ import {
 import { buildToolCallMessageIndex, shortToolCallId } from "~/lib/agent-run-locate";
 import { useAgentRunHistory, useAgentRunList } from "~/hooks/use-agent-run-history";
 import { useRunPlanProjection } from "~/hooks/use-run-plan-projection";
+import { useRunRecovery } from "~/hooks/use-run-recovery";
 import { Button } from "~/components/ui/button";
 import { useAgentRunSelection } from "~/components/workspace/agent-run-selection";
 import api from "~/services/api";
@@ -436,6 +438,7 @@ export function AgentRunPanel({ conversationId }: { conversationId: string | nul
   const list = useAgentRunList(conversationId, entry?.run.id ?? null, epoch);
   const [open, setOpen] = React.useState(false);
   const [sending, setSending] = React.useState(false);
+  const [resuming, setResuming] = React.useState(false);
   const [filter, setFilter] = React.useState<AgentRunEventFilter>("all");
   const [loadingOlderLatest, setLoadingOlderLatest] = React.useState(false);
   const [olderFailedLatest, setOlderFailedLatest] = React.useState(false);
@@ -479,6 +482,19 @@ export function AgentRunPanel({ conversationId }: { conversationId: string | nul
     () => filterAgentRunEvents(eventsForFilter, filter),
     [eventsForFilter, filter],
   );
+
+  // 生命周期 L2:只有「最近一条 stopped/interrupted」是恢复候选;能否恢复由服务端判定
+  // (GET recovery),前端不自行推断。历史 run 保持只读——恢复语义是接着当前任务跑,
+  // 历史任务之后可能已发布新计划,沿用它就是错的。
+  const resumeCandidateId =
+    selectedRunId === null &&
+    entry?.run &&
+    entry.run.status === "stopped" &&
+    entry.run.stopReason === "interrupted"
+      ? entry.run.id
+      : null;
+  const recovery = useRunRecovery(conversationId, resumeCandidateId, epoch);
+  const canResume = resumeCandidateId !== null && recovery.recovery?.mode === "new_run";
 
   if (!entry) return null;
 
@@ -569,6 +585,20 @@ export function AgentRunPanel({ conversationId }: { conversationId: string | nul
     const textarea = pane?.querySelector<HTMLTextAreaElement>("textarea");
     textarea?.focus();
     textarea?.scrollIntoView({ block: "nearest" });
+  };
+  // 恢复:服务端写入恢复消息并点火生成,新 run 由服务端链接到旧 run;
+  // 前端只跟随既有 SSE,不伪造任何 run 状态。
+  const handleResume = async () => {
+    if (!conversationId || !resumeCandidateId || resuming) return;
+    setResuming(true);
+    try {
+      await postAgentRunResume(conversationId, resumeCandidateId);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, t("conversations.agent_run.actions.resume_failed")));
+      recovery.reload();
+    } finally {
+      setResuming(false);
+    }
   };
 
   const status = run?.status ?? null;
@@ -689,6 +719,23 @@ export function AgentRunPanel({ conversationId }: { conversationId: string | nul
           >
             {t("conversations.agent_run.terminal_reason", { reason: terminalReason })}
           </p>
+        ) : null}
+        {canResume ? (
+          <div className="flex items-center gap-1.5 border-t border-[var(--ds-divider)] px-3 py-1.5">
+            <Button
+              type="button"
+              size="xs"
+              variant="tertiary"
+              onClick={handleResume}
+              disabled={resuming || !conversationId}
+            >
+              {resuming ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+              {t("conversations.agent_run.actions.resume")}
+            </Button>
+            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--ds-text-tertiary)]">
+              {t("conversations.agent_run.actions.resume_hint")}
+            </span>
+          </div>
         ) : null}
         {canNudge ? (
           <div className="flex items-center gap-1.5 border-t border-[var(--ds-divider)] px-3 py-1.5">

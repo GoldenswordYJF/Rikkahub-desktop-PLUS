@@ -13,6 +13,7 @@ import api from "~/services/api";
 import type {
   AgentRunEventPageDto,
   AgentRunListDto,
+  AgentRunRecoveryDto,
   AgentRunSnapshotDto,
   RunProjectionDto,
 } from "~/types";
@@ -108,10 +109,30 @@ const defaultFetchProjection = (
     `conversations/${conversationId}/agent-runs/${encodeURIComponent(runId)}/projection`,
   );
 
+// 生命周期 L2:恢复判定只读拉取 + 显式恢复。可恢复性由服务端判定,前端不猜。
+const defaultFetchRecovery = (
+  conversationId: string,
+  runId: string,
+): Promise<AgentRunRecoveryDto> =>
+  api.get<AgentRunRecoveryDto>(
+    `conversations/${conversationId}/agent-runs/${encodeURIComponent(runId)}/recovery`,
+  );
+
+const defaultPostResume = (
+  conversationId: string,
+  runId: string,
+): Promise<{ status: string; resumedFromRunId: string }> =>
+  api.post<{ status: string; resumedFromRunId: string }>(
+    `conversations/${conversationId}/agent-runs/${encodeURIComponent(runId)}/resume`,
+    {},
+  );
+
 let fetchSnapshot = defaultFetchSnapshot;
 let fetchRunList = defaultFetchRunList;
 let fetchEventPage = defaultFetchEventPage;
 let fetchProjection = defaultFetchProjection;
+let fetchRecovery = defaultFetchRecovery;
+let postResume = defaultPostResume;
 
 export function fetchAgentRunList(conversationId: string): Promise<AgentRunListDto> {
   return fetchRunList(conversationId);
@@ -122,6 +143,20 @@ export function fetchAgentRunProjection(
   runId: string,
 ): Promise<RunProjectionDto> {
   return fetchProjection(conversationId, runId);
+}
+
+export function fetchAgentRunRecovery(
+  conversationId: string,
+  runId: string,
+): Promise<AgentRunRecoveryDto> {
+  return fetchRecovery(conversationId, runId);
+}
+
+export function postAgentRunResume(
+  conversationId: string,
+  runId: string,
+): Promise<{ status: string; resumedFromRunId: string }> {
+  return postResume(conversationId, runId);
 }
 
 export function fetchAgentRunEventPage(
@@ -167,11 +202,18 @@ export function installAgentRunSyncTestSeam(seam: {
     limit?: number,
   ) => Promise<AgentRunEventPageDto>;
   fetchProjection?: (conversationId: string, runId: string) => Promise<RunProjectionDto>;
+  fetchRecovery?: (conversationId: string, runId: string) => Promise<AgentRunRecoveryDto>;
+  postResume?: (
+    conversationId: string,
+    runId: string,
+  ) => Promise<{ status: string; resumedFromRunId: string }>;
 }): void {
   if (seam.fetchSnapshot) fetchSnapshot = seam.fetchSnapshot;
   if (seam.fetchRunList) fetchRunList = seam.fetchRunList;
   if (seam.fetchEventPage) fetchEventPage = seam.fetchEventPage;
   if (seam.fetchProjection) fetchProjection = seam.fetchProjection;
+  if (seam.fetchRecovery) fetchRecovery = seam.fetchRecovery;
+  if (seam.postResume) postResume = seam.postResume;
 }
 
 /** 测试专用:清空代次/监听/传输注入。 */
@@ -183,4 +225,6 @@ export function resetAgentRunSyncForTest(): void {
   fetchRunList = defaultFetchRunList;
   fetchEventPage = defaultFetchEventPage;
   fetchProjection = defaultFetchProjection;
+  fetchRecovery = defaultFetchRecovery;
+  postResume = defaultPostResume;
 }

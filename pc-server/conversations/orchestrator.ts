@@ -74,7 +74,7 @@ import { conversationToolsWithDiscovery, isToolDiscoveryEnabled, toolDiscoverySy
 import { applyToolDiscovery, discoverableToolPool, isMcpFunctionTool, type FunctionToolDeclaration } from "../tools/discovery";
 import { promotePendingToolActivation, pruneToolActivation, readToolActivation } from "./tool-activation";
 import { executeToolCall, realizeToolResult, toolResultToParts } from "../tools/execution";
-import { findPlanContext, latestPlan } from "../tools/plan-context";
+import { findPlanContext, latestPlan, runResumeTarget, scheduleTarget } from "../tools/plan-context";
 import { PLAN_TOOL_NAME } from "../tools/plan";
 import type { WorkspaceRuntime } from "../workspace/runtime";
 import type { ReadEvidenceHandle } from "../workspace/ops/read-dedup";
@@ -124,6 +124,7 @@ import {
 import { generateSuggestionsForConversation, generateTitleForConversation, limitAuxiliaryText, markCompactionBoundary, modelExists, resolvePostGenerationModelIds, shouldAutoGenerateTitle } from "./auxiliary";
 import { maybeAutoCompactChat } from "./auto-compaction";
 import { beginAgentRun, createRunBoundaryObserver, type AgentRunTracker } from "../agent-loop/run-tracker";
+import { markScheduleRun } from "../agent-loop/schedule-store";
 import { AgentLoopController } from "../agent-loop/controller";
 import { AgentLoopHaltError, runStatusForHalt } from "../agent-loop/halt";
 
@@ -766,6 +767,10 @@ function dispatchQueuedHead(conversationId: string) {
   if (!next) return;
   // 把队首的用户消息本体落库进历史(与 send 入口同构;parts 入队时已做正则变换),再基于最新历史点火下一条。
   const userMessage = message("USER", next.parts.map((p) => ({ ...p })));
+  // 生命周期 L3:调度投递的 scheduled 注解随消息落库(恢复/审计与计划边界的判定依据)。
+  for (const annotation of next.annotations ?? []) {
+    userMessage.annotations.push(annotation);
+  }
   const userNode = { id: id(), messages: [userMessage], selectIndex: 0 };
   conversation.messages.push(userNode);
   conversation.chatSuggestions = [];
@@ -1412,14 +1417,22 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
   // 自主循环(S1):运行记录是纯观察者——总开关关闭时不建 run、不挂边界回调,sink 出口
   // 也不补 runId,两条引擎通路与引入前逐字一致。聊天引擎"审批暂停→批准后重触发续跑"
   // 接续最近一条 suspended run(一次逻辑任务一条记录),而不是把同一次任务拆成两条。
+  // 生命周期 L2/L3:最近一条 USER 消息的注解决定本次 run 的来源(恢复/调度)。
+  // 审批后接续(suspended)不是新 run,链接字段无意义,保持空。
+  const resumedFromRunId = resumingApprovedTools ? null : runResumeTarget(conversation);
+  const scheduleId = resumingApprovedTools ? null : scheduleTarget(conversation);
   const runTracker: AgentRunTracker | null = state.settings.agentLoop?.enabled === true
     ? beginAgentRun({
         conversationId: conversation.id,
         nodeId: assistantNode.id,
         engine: adapter.kind,
         resumeSuspended: resumingApprovedTools,
+        resumedFromRunId,
+        scheduleId,
       })
     : null;
+  // 调度记录回写 last_run_*(展示/审计用;失败不影响生成)。
+  if (runTracker && scheduleId) markScheduleRun(scheduleId, runTracker.runId, Date.now());
   // O4:审批/执行两处观测统一适配到当前 run tracker;没有 run(开关关闭/落库失败)就不注入。
   const boundaryObserver = runTracker ? createRunBoundaryObserver(runTracker) : undefined;
   // 自主循环(S3):判定表。开关关闭时不建控制器,也不向引擎传任何判定回调——两条

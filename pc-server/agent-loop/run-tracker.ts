@@ -438,6 +438,10 @@ export interface BeginAgentRunInput {
   engine: string;
   /** true:接续最近一条 suspended run(聊天引擎审批后重触发续跑),而不是新开一条。 */
   resumeSuspended?: boolean;
+  /** 生命周期 L2:本次生成由哪条中断 run 显式恢复而来(恢复消息注解);普通生成为空。 */
+  resumedFromRunId?: string | null;
+  /** 生命周期 L3:触发本次生成的调度 id;手动/恢复生成为空。 */
+  scheduleId?: string | null;
 }
 
 /** 开一条运行记录。返回 null = 未启用或落库失败(调用方退回无观测路径,行为不变)。 */
@@ -463,12 +467,16 @@ export function beginAgentRun(input: BeginAgentRunInput): AgentRunTracker | null
   }
   const startedAt = Date.now();
   const runId = id();
+  const resumedFromRunId = input.resumedFromRunId ?? null;
+  const scheduleId = input.scheduleId ?? null;
   const ok = insertRun({
     id: runId,
     conversationId: input.conversationId,
     nodeId: input.nodeId,
     engine: input.engine,
     startedAt,
+    resumedFromRunId,
+    scheduleId,
   });
   if (!ok) return null;
   const summary: AgentRunSummary = {
@@ -484,13 +492,20 @@ export function beginAgentRun(input: BeginAgentRunInput): AgentRunTracker | null
     replanCount: 0,
     stallReason: null,
     goal: null,
+    resumedFromRunId,
+    scheduleId,
     startedAt,
     endedAt: null,
     error: null,
   };
   const tracker = new Tracker(summary);
   activeRuns.set(input.conversationId, tracker);
-  tracker.record("run_started", `开始运行(${input.engine})`, { engine: input.engine, nodeId: input.nodeId });
+  tracker.record("run_started", `开始运行(${input.engine})`, {
+    engine: input.engine,
+    nodeId: input.nodeId,
+    ...(resumedFromRunId ? { resumedFromRunId } : {}),
+    ...(scheduleId ? { scheduleId } : {}),
+  });
   return tracker;
 }
 

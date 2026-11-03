@@ -97,6 +97,7 @@ import { WindowControlsBar, windowDragRegionProps } from "~/components/window-co
 import { ConversationTabStrip } from "~/components/workspace/conversation-tab-strip";
 import { EngineStatusBar } from "~/components/workspace/engine-status-bar";
 import { AgentRunPanel } from "~/components/workspace/agent-run-panel";
+import { AgentRunSchedules } from "~/components/workspace/agent-run-schedules";
 import { AgentRunSelectionProvider } from "~/components/workspace/agent-run-selection";
 import { PaneContainerProvider } from "~/components/workspace/pane-container-context";
 import { WorkspaceEmptyState } from "~/components/workspace/workspace-empty-state";
@@ -2572,9 +2573,7 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
         onLocateMessage={handleLocateMessage}
       >
       <div
-        className="chat-pane relative flex h-full min-h-0 flex-1 flex-col"
-        // chat-pane:输入区伴侣的容器查询基准(见 app.css .companion-dock)。按窗格宽度
-        // 而非视口决定宠物是否出现——分栏时视口很宽,但单列放不下左侧空档。
+        className="relative flex h-full min-h-0 flex-1 flex-col"
         // 点击非焦点列任意处 → 聚焦并把路由切到它的激活会话。会话标签自己会导航到它指定
         // 的会话(data-tab-nav),不能让这里先抢一次焦点切换,否则先跳本列旧会话、
         // 再跳目标会话,中间闪一帧。
@@ -2658,6 +2657,8 @@ const ConversationPaneView = React.memo(function ConversationPaneView({
             <EngineStatusBar conversationId={activeId} />
             {/* 本次运行(自主循环 S1):折叠流水条,实验开关关闭时不渲染。 */}
             <AgentRunPanel conversationId={activeId} />
+            {/* 生命周期 L3:会话定时任务(调度开关关闭时整块不渲染)。 */}
+            <AgentRunSchedules conversationId={activeId} />
             {/* 语音模式横幅(免提对话循环;关闭时不渲染)。 */}
             {voiceActive && activeId ? (
               <VoiceModeBanner onEnd={() => voiceMode.stop()} onRetry={handleToggleVoiceMode} />

@@ -153,6 +153,28 @@ function v2Plan(status: "pending" | "completed", evidence: string[] = []): Plan 
   );
 }
 
+function graphPlan(): Plan {
+  return normalizePlan(
+    {
+      goal: "把验收跑通",
+      done_when: ["所有用例通过"],
+      boundaries: ["不删测试"],
+      steps: [
+        {
+          id: "s1",
+          content: "执行验收",
+          status: "failed",
+          verify: "test",
+          attempts: 3,
+          max_attempts: 3,
+          last_error: "boom",
+        },
+      ],
+    },
+    { graph: true, trusted: true },
+  );
+}
+
 describe("S5 验收 — 判定表与骨架真实串联", () => {
   test("§6-4 同参同输出连续 3 次 → stalled;半截工具产出保留在消息里", async () => {
     const planRef = { plan: v2Plan("pending") };
@@ -227,6 +249,18 @@ describe("S5 验收 — 判定表与骨架真实串联", () => {
 
     expect(await runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).toBe("换方案完成");
     expect(executed).toEqual([JSON.stringify({ path: "a" }), JSON.stringify({ path: "b" })]);
+  });
+
+  test("任务图预算耗尽 → awaiting_user;不把失败步骤当成功收尾", async () => {
+    const { controller, stalls } = controllerFor({ plan: graphPlan() });
+    const adapter = adapterFor([noTools("我完成了")]);
+    const { hooks } = harnessFor(controller, async () => ({ output: [] }));
+
+    await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toMatchObject({
+      name: "AgentLoopHaltError",
+      status: "awaiting_user",
+    });
+    expect(stalls.join("\n")).toContain("任务图步骤重试预算耗尽");
   });
 
   test("§6-10 轮次耗尽 → exhausted;已执行的 256 轮工具产出仍保留", async () => {

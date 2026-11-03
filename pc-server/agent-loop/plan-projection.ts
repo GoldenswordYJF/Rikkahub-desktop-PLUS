@@ -90,10 +90,14 @@ function planOccurrences(index: ConversationToolIndex, toolCallId: string): Foun
   return found;
 }
 
-/** steering 注入的用户消息属于同一任务;其余 USER 消息开启新任务,是兜底扫描的硬边界。 */
+/** steering 注入与 run_resume 恢复的用户消息属于同一任务;其余 USER 消息开启新任务,
+ *  是兜底扫描的硬边界。恢复的新 run 必须能沿选中分支找回旧计划(生命周期 L2)。 */
 function isTaskBoundary(message: Message): boolean {
   if (message.role !== "USER") return false;
-  return !message.annotations.some((annotation) => isRecord(annotation) && annotation.type === "steered");
+  return !message.annotations.some(
+    (annotation) =>
+      isRecord(annotation) && (annotation.type === "steered" || annotation.type === "run_resume"),
+  );
 }
 
 /** 没有该 run 的计划事件时,沿选中分支从 run 节点向前找最近权威快照。 */

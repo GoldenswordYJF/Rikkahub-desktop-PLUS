@@ -203,18 +203,6 @@
     "sandbox_mechanism_container": "Container mounts",
     "sandbox_mechanism_none": "none"
   },
-  "companion": {
-    "aria": "{{name}}: click to interact, drag to move",
-    "deepy": {
-      "name": "Deepy",
-      "poke_1": "Glub glub.",
-      "poke_2": "Deepy is listening.",
-      "poke_3": "...one more lap.",
-      "poke_4": "Out of bubbles. Carry on.",
-      "attention": "Someone needs your OK.",
-      "compacting": "Swallowing the context..."
-    }
-  },
   "integrations": {
     "title": "MCP & Extensions",
     "description": "Pick MCP tools and extensions for this assistant",

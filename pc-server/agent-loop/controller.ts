@@ -18,7 +18,8 @@
 import type { JsonValue, ToolOutputEntry } from "../foundation/types";
 import { isRecord } from "../foundation/utils";
 import type { LoopDecision, LoopToolObservation } from "../inference-engine/events";
-import { isPlanV2, type Plan, type PlanStep } from "../tools/plan";
+import { isPlanV2, isPlanV3, type Plan, type PlanStep } from "../tools/plan";
+import { analyzePlanGraph } from "../tools/plan-graph";
 
 export interface AgentLoopControllerConfig {
   maxReplans: number;
@@ -41,27 +42,69 @@ export interface AgentLoopControllerDeps {
   /** 判定为停滞时调用(运行记录:stall 事件 + 相位)。 */
   onStall?: (info: {
     reason: string;
-    kind: "repeat" | "same_error" | "unsettled";
+    kind: "repeat" | "same_error" | "unsettled" | "exhausted";
   }) => void;
   /** 计划里出现目标时回调(运行记录回填 goal 快照)。 */
   onGoal?: (goal: string) => void;
 }
 
-/** 完成校验口径:未了结 = pending/in_progress;未验证 = completed 但无证据。 */
+/** 完成校验口径:未了结 = pending/in_progress;未验证 = completed 但无证据。
+ *  v3 额外给出图状态;旧计划不返回这些字段,保持既有形状。 */
 export interface PlanVerification {
   ok: boolean;
   pending: string[];
   unverified: string[];
   /** 通过校验的已了结步骤数(replan 无进展判定的进度基线)。 */
   settled: number;
+  /** 仅 v3:可执行 / 阻塞 / 可重试 / 预算耗尽。 */
+  ready?: string[];
+  blocked?: Record<string, string[]>;
+  retryable?: string[];
+  exhausted?: string[];
 }
 
 function stepLabel(step: PlanStep, index: number): string {
   return step.id ?? `s${index + 1}`;
 }
 
-/** 完成校验(plan §3.5)。requireVerified=false 时 completed 一律算通过(兼容旧计划语义)。 */
+/** 完成校验(plan §3.5)。requireVerified=false 时 completed 一律算通过(兼容旧计划语义)。
+ *  v3 必须图内所有未取消步骤完成且无 exhausted;blocked 不会因为“没人做”而被忽略。 */
 export function verifyPlanCompletion(plan: Plan, requireVerified: boolean): PlanVerification {
+  if (isPlanV3(plan)) {
+    const analysis = analyzePlanGraph(plan, { requireVerified });
+    const active = plan.steps
+      .map((step, index) => ({ step, id: stepLabel(step, index) }))
+      .filter(({ step }) => step.status === "in_progress")
+      .map(({ id }) => id);
+    const unverified = plan.steps
+      .map((step, index) => ({ step, id: stepLabel(step, index) }))
+      .filter(({ step }) => step.status === "completed" && requireVerified && (step.evidence?.length ?? 0) === 0)
+      .map(({ id }) => id);
+    const pending = [
+      ...new Set([
+        ...analysis.ready,
+        ...Object.keys(analysis.blocked),
+        ...analysis.retryable,
+        ...active,
+      ]),
+    ];
+    const settled = plan.steps.filter(
+      (step) =>
+        step.status === "cancelled" ||
+        (step.status === "completed" && (!requireVerified || (step.evidence?.length ?? 0) > 0)),
+    ).length;
+    return {
+      ok: pending.length === 0 && unverified.length === 0 && analysis.exhausted.length === 0,
+      pending,
+      unverified,
+      settled,
+      ready: analysis.ready,
+      blocked: analysis.blocked,
+      retryable: analysis.retryable,
+      exhausted: analysis.exhausted,
+    };
+  }
+
   const pending: string[] = [];
   const unverified: string[] = [];
   let settled = 0;
@@ -206,7 +249,10 @@ export class AgentLoopController {
   evaluateToolRound(observations: LoopToolObservation[]): LoopDecision {
     const plan = this.deps.readPlan();
     if (plan?.goal) this.deps.onGoal?.(plan.goal);
-    const settled = plan ? verifyPlanCompletion(plan, this.config.requireVerifiedCompletion).settled : 0;
+    const verification = plan
+      ? verifyPlanCompletion(plan, this.config.requireVerifiedCompletion)
+      : null;
+    const settled = verification?.settled ?? 0;
 
     let repeatLimitHit: { toolName: string } | null = null;
     let repeatHint: { toolName: string } | null = null;
@@ -256,6 +302,13 @@ export class AgentLoopController {
       const reason = `同一工具以相同参数连续调用 ${this.repeatCount} 次且输出无变化(${repeatLimitHit.toolName})`;
       this.deps.onStall?.({ reason, kind: "repeat" });
       return { action: "halt", status: "stalled", reason };
+    }
+
+    // 任务图预算耗尽比通用同错 replan 更硬:继续注入只会让模型在已判死的步骤上烧轮次。
+    if (verification?.exhausted?.length) {
+      const reason = `任务图步骤重试预算耗尽:${verification.exhausted.join(", ")}`;
+      this.deps.onStall?.({ reason, kind: "exhausted" });
+      return { action: "halt", status: "awaiting_user", reason };
     }
 
     if (errorLimitHit) {
@@ -315,15 +368,33 @@ export class AgentLoopController {
     if (!plan || !isPlanV2(plan) || plan.steps.length === 0) return CONTINUE;
 
     const verification = verifyPlanCompletion(plan, this.config.requireVerifiedCompletion);
+    const graph = isPlanV3(plan);
+    if (graph && verification.exhausted?.length) {
+      const reason = `任务图步骤重试预算耗尽:${verification.exhausted.join(", ")}`;
+      this.deps.onStall?.({ reason, kind: "exhausted" });
+      return { action: "halt", status: "awaiting_user", reason };
+    }
     if (verification.ok) {
       this.verifyInjections = 0;
       this.verifyFingerprint = null;
       return CONTINUE;
     }
 
-    const fingerprint = `${verification.pending.join(",")}|${verification.unverified.join(",")}`;
+    const fingerprint = graph
+      ? JSON.stringify({
+          pending: verification.pending,
+          unverified: verification.unverified,
+          ready: verification.ready ?? [],
+          blocked: verification.blocked ?? {},
+          retryable: verification.retryable ?? [],
+        })
+      : `${verification.pending.join(",")}|${verification.unverified.join(",")}`;
     if (this.verifyInjections > 0 && this.verifyFingerprint === fingerprint) {
-      const reason = `计划仍未了结(${fingerprint.replace("|", " / ")}),重采样后无进展`;
+      const reason = graph
+        ? `任务图仍未了结(ready ${verification.ready?.join(",") || "无"};blocked ${
+            Object.keys(verification.blocked ?? {}).join(",") || "无"
+          };retryable ${verification.retryable?.join(",") || "无"}),重采样后无进展`
+        : `计划仍未了结(${fingerprint.replace("|", " / ")}),重采样后无进展`;
       this.deps.onStall?.({ reason, kind: "unsettled" });
       return { action: "halt", status: "stalled", reason };
     }
@@ -331,6 +402,29 @@ export class AgentLoopController {
     this.verifyFingerprint = fingerprint;
 
     const parts: string[] = [`Do not finish yet: the plan "${plan.title || "current plan"}" is not complete.`];
+    if (graph) {
+      if (verification.ready?.length) {
+        parts.push(`Ready steps: ${verification.ready.join(", ")}.`);
+      }
+      if (verification.retryable?.length) {
+        const byId = new Map(plan.steps.map((step, index) => [stepLabel(step, index), step]));
+        const detail = verification.retryable
+          .map((id) => {
+            const step = byId.get(id);
+            return `${id} (attempt ${step?.attempts ?? 0}/${step?.maxAttempts ?? 3})`;
+          })
+          .join(", ");
+        parts.push(`Retryable failed steps: ${detail}. Change the approach or arguments before retrying.`);
+      }
+      const blockedEntries = Object.entries(verification.blocked ?? {});
+      if (blockedEntries.length) {
+        parts.push(
+          `Blocked steps (finish or cancel their dependencies first): ${blockedEntries
+            .map(([id, deps]) => `${id} needs ${deps.join("+")}`)
+            .join("; ")}.`,
+        );
+      }
+    }
     if (verification.pending.length) {
       parts.push(`Unfinished steps: ${verification.pending.join(", ")}.`);
     }
@@ -341,8 +435,12 @@ export class AgentLoopController {
       );
     }
     parts.push(
-      `Continue working. Mark a step completed only when you have evidence for it, ` +
-        `or cancel steps that are no longer needed. Do not claim completion without evidence.`,
+      graph
+        ? `Continue with a ready step only; keep at most one step in_progress. ` +
+            `Mark a step completed only when you have evidence, mark a failed step failed with last_error, ` +
+            `or cancel steps that are no longer needed. Do not claim completion without evidence.`
+        : `Continue working. Mark a step completed only when you have evidence for it, ` +
+            `or cancel steps that are no longer needed. Do not claim completion without evidence.`,
     );
     return { action: "inject", text: parts.join(" ") };
   }

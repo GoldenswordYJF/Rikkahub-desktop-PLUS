@@ -55,6 +55,8 @@ interface RunRow {
   replan_count: number;
   stall_reason: string | null;
   goal: string | null;
+  resumed_from_run_id: string | null;
+  schedule_id: string | null;
   started_at: number;
   ended_at: number | null;
   error: string | null;
@@ -97,6 +99,8 @@ function toSummary(row: RunRow): AgentRunSummary {
     replanCount: row.replan_count,
     stallReason: row.stall_reason,
     goal: row.goal,
+    resumedFromRunId: row.resumed_from_run_id ?? null,
+    scheduleId: row.schedule_id ?? null,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     error: row.error,
@@ -144,16 +148,29 @@ export function insertRun(input: {
   nodeId: string | null;
   engine: string;
   startedAt: number;
+  /** 生命周期 L1:本 run 由哪条中断 run 显式恢复而来;普通运行为 null。 */
+  resumedFromRunId?: string | null;
+  /** 生命周期 L3:触发本 run 的调度 id;手动/恢复运行为 null。 */
+  scheduleId?: string | null;
 }): boolean {
   const handle = db();
   if (!handle) return false;
   try {
     handle
       .prepare(
-        `INSERT INTO pc_generation_run (id, conversation_id, node_id, engine, status, phase, started_at)
-         VALUES (?, ?, ?, ?, 'running', 'planning', ?)`,
+        `INSERT INTO pc_generation_run
+           (id, conversation_id, node_id, engine, status, phase, started_at, resumed_from_run_id, schedule_id)
+         VALUES (?, ?, ?, ?, 'running', 'planning', ?, ?, ?)`,
       )
-      .run(input.id, input.conversationId, input.nodeId, input.engine, input.startedAt);
+      .run(
+        input.id,
+        input.conversationId,
+        input.nodeId,
+        input.engine,
+        input.startedAt,
+        input.resumedFromRunId ?? null,
+        input.scheduleId ?? null,
+      );
     trimRuns(handle, input.conversationId);
     return true;
   } catch (err) {
@@ -203,6 +220,76 @@ export function updateRun(id: string, patch: RunPatch): void {
     handle.prepare(`UPDATE pc_generation_run SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
   } catch (err) {
     warnOnce("updateRun", err);
+  }
+}
+
+/** 生命周期 L4:跨会话审计查询(只返回摘要,不含正文)。
+ *  固定排序 started_at DESC, id DESC;游标为上一页最后一行的 (startedAt, id),
+ *  同时给出两者时用复合比较,避免同毫秒记录在页边界被跳过。 */
+export interface AgentRunAuditQuery {
+  conversationId?: string;
+  status?: AgentRunStatus;
+  engine?: string;
+  scheduleId?: string;
+  beforeStartedAt?: number;
+  beforeId?: string;
+  limit?: number;
+}
+
+export interface AgentRunAuditPage {
+  runs: AgentRunSummary[];
+  /** 下一页游标;null = 没有更多(或本次为空)。 */
+  nextBeforeStartedAt: number | null;
+  nextBeforeId: string | null;
+}
+
+export function listAgentRunsForAudit(query: AgentRunAuditQuery = {}): AgentRunAuditPage {
+  const handle = db();
+  if (!handle) return { runs: [], nextBeforeStartedAt: null, nextBeforeId: null };
+  const limit = Math.min(100, Math.max(1, Math.floor(query.limit ?? 50) || 50));
+  const where: string[] = [];
+  const values: Array<string | number> = [];
+  if (query.conversationId) {
+    where.push("conversation_id = ?");
+    values.push(query.conversationId);
+  }
+  if (query.status) {
+    where.push("status = ?");
+    values.push(query.status);
+  }
+  if (query.engine) {
+    where.push("engine = ?");
+    values.push(query.engine);
+  }
+  if (query.scheduleId) {
+    where.push("schedule_id = ?");
+    values.push(query.scheduleId);
+  }
+  if (typeof query.beforeStartedAt === "number") {
+    if (query.beforeId) {
+      where.push("(started_at < ? OR (started_at = ? AND id < ?))");
+      values.push(query.beforeStartedAt, query.beforeStartedAt, query.beforeId);
+    } else {
+      where.push("started_at < ?");
+      values.push(query.beforeStartedAt);
+    }
+  }
+  try {
+    const sql = `SELECT * FROM pc_generation_run
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY started_at DESC, id DESC LIMIT ?`;
+    const rows = handle.prepare(sql).all(...values, limit + 1) as RunRow[];
+    const page = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const last = page.at(-1);
+    return {
+      runs: page.map(toSummary),
+      nextBeforeStartedAt: hasMore && last ? last.started_at : null,
+      nextBeforeId: hasMore && last ? last.id : null,
+    };
+  } catch (err) {
+    warnOnce("listAgentRunsForAudit", err);
+    return { runs: [], nextBeforeStartedAt: null, nextBeforeId: null };
   }
 }
 
@@ -361,6 +448,25 @@ export function listRunEventPage(
 /** 兼容读取:默认上限内的一页事件(升序)。长运行应使用 listRunEventPage 并向前翻页。 */
 export function listRunEvents(runId: string, limit = AGENT_RUN_EVENT_PAGE_MAX): AgentRunEventDto[] {
   return listRunEventPage(runId, { limit }).events;
+}
+
+/** 生命周期 L4:导出用顺序读(seq > afterSeq,升序),逐页取,不整段拼接。
+ *  与 listRunEventPage 的"从尾部向前翻"互补,同一份表与排序。 */
+export function listRunEventsAfter(runId: string, afterSeq: number, limit = AGENT_RUN_EVENT_PAGE_MAX): AgentRunEventDto[] {
+  const handle = db();
+  if (!handle) return [];
+  try {
+    const rows = handle
+      .prepare(
+        `SELECT seq, at, kind, summary, payload FROM pc_generation_run_event
+         WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+      )
+      .all(runId, afterSeq, normalizeEventPageLimit(limit)) as EventRow[];
+    return rows.map(toEvent);
+  } catch (err) {
+    warnOnce("listRunEventsAfter", err);
+    return [];
+  }
 }
 
 function payloadRecord(value: string | null): Record<string, unknown> | null {

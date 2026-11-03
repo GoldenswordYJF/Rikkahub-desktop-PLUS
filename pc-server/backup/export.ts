@@ -178,7 +178,6 @@ export const PC_ONLY_DISPLAY_SETTING_FIELDS: ReadonlySet<string> = new Set([
   "themeMode", "colorTheme", "userThemes", "language", "collapseAllSteps",
   "toolTraceCompact", "planPanel",
   "pcPasteLongTextAsFile", "pcPasteLongTextThreshold",
-  "showCompanion", "companionSkin", "companionBubbles", "companionScale", "companionPos",
 ]);
 
 /** PC 独有的 MCP 传输:stdio 要子进程、builtin 跑在 pc-server 进程里,安卓两者都不存在。
@@ -472,8 +471,10 @@ export function filterMessagePartsForAndroid(
  *  保真注解(块结构/思维链签名),纯 PC 工作区语义,同样不得流入安卓。steered 是
  *  steer 插话用户消息的轻量标注(仅 PC 用于将来可选 UI 标记),同样不得流入安卓。
  *  compaction_cut 是非破坏式压缩的记忆边界标记(对话引擎手动压缩),安卓无此语义。
- *  pinned 是用户钉住关键消息的标记(压缩时逐字注入),安卓无此能力。 */
-export const PC_ONLY_ANNOTATION_TYPES: ReadonlySet<string> = new Set(["model_call_error", "pi-fidelity", "compaction_boundary", "compaction_cut", "steered", "pinned", "agent_loop_halt"]);
+ *  pinned 是用户钉住关键消息的标记(压缩时逐字注入),安卓无此能力。
+ *  run_resume 是生命周期 L2 恢复消息的标记(指向被恢复的旧 run id),安卓无此语义。
+ *  scheduled 是生命周期 L3 调度投递消息的标记(指向调度 id),安卓无调度能力。 */
+export const PC_ONLY_ANNOTATION_TYPES: ReadonlySet<string> = new Set(["model_call_error", "pi-fidelity", "compaction_boundary", "compaction_cut", "steered", "pinned", "agent_loop_halt", "run_resume", "scheduled"]);
 
 /** A-2:导出方向的注解清洗。只保留"带字符串判别符且非 PC-only"的注解——缺判别符的
  *  遗留脏对象与 PC-only 类型都会让安卓多态解码即炸;安卓自有/未来新增类型原样透传。 */

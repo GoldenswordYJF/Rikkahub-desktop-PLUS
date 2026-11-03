@@ -25,6 +25,7 @@ import {
 } from "~/components/settings/shared";
 import { Input } from "~/components/ui/input";
 import type { SettingsSectionProps } from "~/components/settings/settings-registry";
+import { AgentBotAuditSection } from "~/components/settings/experiments/agent-bot-audit";
 
 const DEFAULT_SETTINGS: AgentLoopSettings = {
   enabled: false,
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS: AgentLoopSettings = {
   stallRepeatLimit: 3,
   sameErrorLimit: 3,
   requireVerifiedCompletion: true,
+  schedulingEnabled: false,
 };
 
 function errorText(err: unknown): string {
@@ -119,6 +121,7 @@ export function AgentBotSection({ settings, onSettings }: SettingsSectionProps) 
   const off = !current.enabled;
   // 板块折叠状态由本页持有：切走再回来复位为收起（与其他设置页的高级区一致）。
   const [loopOpen, setLoopOpen] = React.useState(false);
+  const [auditOpen, setAuditOpen] = React.useState(false);
 
   return (
     <SettingsStack>
@@ -150,6 +153,13 @@ export function AgentBotSection({ settings, onSettings }: SettingsSectionProps) 
             description={t("settings:experiments.agent_bot.transport_retry_desc")}
             checked={current.transportRetry}
             onCheckedChange={(checked) => void patch({ transportRetry: checked })}
+          />
+          <SettingsSwitchRow
+            label={t("settings:experiments.agent_bot.scheduling")}
+            description={t("settings:experiments.agent_bot.scheduling_desc")}
+            checked={current.schedulingEnabled}
+            disabled={!current.enabled}
+            onCheckedChange={(checked) => void patch({ schedulingEnabled: checked })}
           />
         </SettingsRows>
       </SettingsGroup>
@@ -223,6 +233,18 @@ export function AgentBotSection({ settings, onSettings }: SettingsSectionProps) 
             }
           />
         </SettingsRows>
+      </SettingsFold>
+
+      {/* 生命周期 L4:运行审计(跨会话只读)。与运行面板同源,不复制详情模型。 */}
+      <SettingsFold
+        id="agent-bot-audit"
+        title={t("settings:experiments.agent_bot.audit_title")}
+        description={t("settings:experiments.agent_bot.audit_desc")}
+        summary={t("settings:experiments.agent_bot.audit_summary")}
+        open={auditOpen}
+        onOpenChange={setAuditOpen}
+      >
+        <AgentBotAuditSection />
       </SettingsFold>
     </SettingsStack>
   );

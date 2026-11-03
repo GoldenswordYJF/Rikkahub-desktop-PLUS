@@ -16,6 +16,8 @@ import { saveState, setState, state } from "./persistence/json-store";
 import { loadState } from "./persistence/state-load";
 import { getConversationsDb, initConversationsRuntime } from "./conversations";
 import { repairForkNodeTheft } from "./conversations/fork-repair";
+import { reconcileAgentRunsAfterBoot } from "./agent-loop/run-recovery";
+import { AgentTaskScheduler } from "./agent-loop/scheduler";
 import { initSseWiring } from "./api/sse";
 import { initMcpHealthBroadcast } from "./api/sse";
 import { startMcpHealthSupervisor } from "./tools/mcp-health";
@@ -56,6 +58,20 @@ export async function bootstrap(): Promise<void> {
 
   // 3) 会话运行时:working set 判据接线 + 驻留清扫定时器。
   initConversationsRuntime();
+
+  // 3-run) 生命周期 L1:启动收敛上一进程遗留的 running run(stopped/interrupted + 终局事件)。
+  //     必须在任何新生成/调度之前:数据目录锁保证单写入进程,残留的 running 不可能还在跑,
+  //     不收敛的话前端会一直显示"运行中"。幂等;suspended 保留给恢复接口验证。失败不阻塞启动。
+  try {
+    const reconciled = reconcileAgentRunsAfterBoot();
+    if (reconciled.runningStopped > 0 || reconciled.suspendedKept > 0) {
+      console.log(
+        `[agent-loop] 启动收敛:中断 ${reconciled.runningStopped} 条遗留 running,保留 ${reconciled.suspendedKept} 条 suspended`,
+      );
+    }
+  } catch (err) {
+    console.error("[agent-loop] 启动收敛异常(不阻塞启动):", err);
+  }
 
   // 3a) 实验：周期维护补算。只写失真 / 保真计划（dry-run），不调用模型、不改记忆；
   //     延迟 5 秒是为了让端口、SSE 和首屏请求先就绪；实验开关关闭时函数直接早退。
@@ -101,4 +117,8 @@ export async function bootstrap(): Promise<void> {
   //    launchCount 在这类会话中永不落盘。
   setStartupPhase("finalize");
   saveState();
+
+  // 5) 生命周期 L3:耐久调度器。必须在启动收敛(3-run)之后启动;开关关闭时 tick 零副作用。
+  //    定时器 unref,不阻止退出;停机时由 shutdown 的 stopProducers 停止。
+  AgentTaskScheduler.start();
 }

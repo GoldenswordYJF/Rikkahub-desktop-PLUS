@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   isPlanV2,
+  isPlanV3,
   isStepUnverified,
   mergePlan,
   normalizePlan,
@@ -16,6 +17,7 @@ import {
   PLAN_MAX_CONTENT_LEN,
   PLAN_MAX_STEPS,
   planProgress,
+  planReceipt,
   planStepsSchema,
   planToolOutcome,
   planToolParameters,
@@ -199,6 +201,41 @@ describe("计划 v2 — 声明门控(自主循环关闭时零行为差)", () => 
       completed: 1,
       in_progress: "迁移",
     });
+  });
+
+  test("v3 才声明依赖、预算与 failed 状态;关闭时 enum 与引入前一致", () => {
+    const stepOf = (v2: boolean, graph: boolean) =>
+      (planStepsSchema(v2, graph) as {
+        items: { properties: { status: { enum: string[] }; [key: string]: unknown } };
+      }).items.properties;
+    expect(Object.keys(stepOf(true, false))).toEqual(["content", "status", "id", "verify", "evidence"]);
+    expect(Object.keys(stepOf(true, true))).toEqual([
+      "content",
+      "status",
+      "id",
+      "verify",
+      "evidence",
+      "depends_on",
+      "max_attempts",
+    ]);
+    expect(stepOf(true, false).status.enum).not.toContain("failed");
+    expect(stepOf(true, true).status.enum).toContain("failed");
+  });
+
+  test("v3 回执带图状态计数", () => {
+    const receipt = planReceipt(
+      normalizePlan(
+        {
+          goal: "迁移",
+          steps: [
+            { id: "s1", content: "导出", status: "completed", evidence: ["tc"] },
+            { id: "s2", content: "导入", status: "pending", depends_on: ["s1"] },
+          ],
+        },
+        { graph: true, trusted: true },
+      ),
+    );
+    expect(receipt).toMatchObject({ ready: 1, blocked: 0, retryable: 0, exhausted: 0, failed: 0 });
   });
 });
 
@@ -389,8 +426,183 @@ describe("计划 v2 — 改写保护与计数(自主循环 S2)", () => {
   });
 });
 
-describe("planFromToolPart — 单个工具卡还原权威计划(O3)", () => {
-  test("优先 metadata.planV2;缺失时回退解析 input JSON", () => {
+describe("计划 v3 — 任务图合并与重试所有权", () => {
+  const base: Plan = normalizePlan(
+    {
+      goal: "迁移",
+      steps: [
+        { id: "s1", content: "导出", status: "in_progress", max_attempts: 3 },
+        { id: "s2", content: "导入", status: "pending", depends_on: ["s1"] },
+      ],
+    },
+    { graph: true, trusted: true },
+  );
+
+  test("rejects invalid graphs without replacing the previous plan", () => {
+    const merged = mergePlan(
+      base,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "in_progress" },
+          { id: "s2", content: "导入", status: "pending", depends_on: ["missing"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(merged.accepted).toBe(false);
+    expect(merged.plan.steps.map((step) => step.id)).toEqual(["s1", "s2"]);
+    expect(merged.warnings.join("\n")).toContain("unknown_dependency");
+
+    const outcome = planToolOutcome(
+      base,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "in_progress" },
+          { id: "s2", content: "导入", status: "pending", depends_on: ["missing"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(JSON.parse(outcome.output[0].text).status).toBe("plan_rejected");
+    expect((outcome.output[0].metadata?.planV2 as { steps: unknown[] }).steps).toHaveLength(2);
+  });
+
+  test("increments attempts only on a new transition to failed", () => {
+    const first = mergePlan(
+      base,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "failed", last_error: "timeout" },
+          { id: "s2", content: "导入", status: "pending", depends_on: ["s1"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(first.accepted).toBe(true);
+    expect(first.plan.steps[0]).toMatchObject({ status: "failed", attempts: 1, lastError: "timeout" });
+
+    const second = mergePlan(
+      first.plan,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "failed", last_error: "timeout" },
+          { id: "s2", content: "导入", status: "pending", depends_on: ["s1"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(second.plan.steps[0].attempts).toBe(1);
+  });
+
+  test("keeps retry counters and budgets code-owned", () => {
+    const atLimit: Plan = normalizePlan(
+      {
+        goal: "迁移",
+        steps: [
+          {
+            id: "s1",
+            content: "导出",
+            status: "failed",
+            attempts: 2,
+            max_attempts: 2,
+            last_error: "timeout",
+          },
+        ],
+      },
+      { graph: true, trusted: true },
+    );
+    const changed = mergePlan(
+      atLimit,
+      { steps: [{ id: "s1", content: "导出", status: "failed", max_attempts: 5, attempts: 0 }] },
+      { taskGraph: true },
+    );
+    expect(changed.accepted).toBe(true);
+    expect(changed.plan.steps[0]).toMatchObject({ attempts: 2, maxAttempts: 2 });
+    expect(changed.warnings.join("\n")).toContain("max_attempts");
+
+    const restart = mergePlan(
+      atLimit,
+      { steps: [{ id: "s1", content: "导出", status: "in_progress" }] },
+      { taskGraph: true },
+    );
+    expect(restart.accepted).toBe(false);
+    expect(restart.plan.steps[0].status).toBe("failed");
+    expect(restart.warnings.join("\n")).toContain("exhausted");
+  });
+
+  test("rejects starting a blocked or second active step", () => {
+    const bothActive = mergePlan(
+      base,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "in_progress" },
+          { id: "s2", content: "导入", status: "in_progress", depends_on: ["s1"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(bothActive.accepted).toBe(false);
+    expect(bothActive.warnings.join("\n")).toContain("only one step");
+
+    const blocked = mergePlan(
+      base,
+      {
+        steps: [
+          { id: "s1", content: "导出", status: "pending" },
+          { id: "s2", content: "导入", status: "in_progress", depends_on: ["s1"] },
+        ],
+      },
+      { taskGraph: true },
+    );
+    expect(blocked.accepted).toBe(false);
+    expect(blocked.warnings.join("\n")).toContain("unmet dependencies");
+  });
+
+  test("依赖证据口径跟随 requireVerifiedCompletion", () => {
+    const previous = normalizePlan(
+      {
+        goal: "迁移",
+        steps: [
+          { id: "s1", content: "导出", status: "completed" },
+          { id: "s2", content: "导入", status: "pending", depends_on: ["s1"] },
+        ],
+      },
+      { graph: true, trusted: true },
+    );
+    const input = {
+      steps: [
+        { id: "s1", content: "导出", status: "completed" },
+        { id: "s2", content: "导入", status: "in_progress", depends_on: ["s1"] },
+      ],
+    };
+    expect(mergePlan(previous, input, { taskGraph: true }).accepted).toBe(false);
+    expect(mergePlan(previous, input, { taskGraph: true, requireVerified: false }).accepted).toBe(true);
+  });
+
+  test("首次非法图返回 plan_rejected 且不写权威快照", () => {
+    const outcome = planToolOutcome(
+      null,
+      {
+        goal: "迁移",
+        steps: [{ id: "s1", content: "导出", status: "pending", depends_on: ["s1"] }],
+      },
+      { taskGraph: true },
+    );
+    const receipt = JSON.parse(outcome.output[0].text);
+    expect(receipt.status).toBe("plan_rejected");
+    expect(outcome.output[0].metadata).toBeUndefined();
+  });
+
+  test("v3 快照往返保留依赖与预算", () => {
+    const snapshot = toPlanSnapshot(base);
+    expect(snapshot.steps[1]).toMatchObject({ depends_on: ["s1"], max_attempts: 3 });
+    const roundTrip = normalizePlan(snapshot, { graph: true, trusted: true });
+    expect(roundTrip.steps[1]).toMatchObject({ dependsOn: ["s1"], maxAttempts: 3 });
+    expect(isPlanV3(roundTrip)).toBe(true);
+  });
+});
+
+describe("planFromToolPart — 单个工具卡还原权威计划(O3)", () => {  test("优先 metadata.planV2;缺失时回退解析 input JSON", () => {
     const snapshot = {
       title: "T",
       goal: "锁定目标",

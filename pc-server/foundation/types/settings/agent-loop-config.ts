@@ -28,6 +28,8 @@ export interface AgentLoopSettings {
   sameErrorLimit: number;
   /** 完成必须带工具证据:模型标 completed 但无证据的步骤不计入完成判定。 */
   requireVerifiedCompletion: boolean;
+  /** 生命周期 L3:耐久调度开关。关闭只停止投递,不删已有调度记录(可审计)。 */
+  schedulingEnabled: boolean;
 }
 
 export function defaultAgentLoopConfig(): AgentLoopSettings {
@@ -38,6 +40,7 @@ export function defaultAgentLoopConfig(): AgentLoopSettings {
     stallRepeatLimit: 3,
     sameErrorLimit: 3,
     requireVerifiedCompletion: true,
+    schedulingEnabled: false,
   };
 }
 
@@ -61,6 +64,10 @@ export function normalizeAgentLoopConfig(raw: unknown): AgentLoopSettings {
       typeof input.requireVerifiedCompletion === "boolean"
         ? input.requireVerifiedCompletion
         : defaults.requireVerifiedCompletion,
+    schedulingEnabled:
+      typeof input.schedulingEnabled === "boolean"
+        ? input.schedulingEnabled
+        : defaults.schedulingEnabled,
   };
 }
 
@@ -72,7 +79,7 @@ export type AgentLoopPatchResult =
  *  拒绝,不夹取、不部分生效;未提供的字段不进补丁。 */
 export function validateAgentLoopPatch(body: Record<string, unknown>): AgentLoopPatchResult {
   const patch: Partial<AgentLoopSettings> = {};
-  const booleans = ["enabled", "transportRetry", "requireVerifiedCompletion"] as const;
+  const booleans = ["enabled", "transportRetry", "requireVerifiedCompletion", "schedulingEnabled"] as const;
   for (const key of booleans) {
     const value = body[key];
     if (value === undefined) continue;

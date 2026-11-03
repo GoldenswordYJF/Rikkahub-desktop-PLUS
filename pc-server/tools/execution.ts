@@ -161,13 +161,18 @@ export async function executeToolCall(
         "The plan panel is currently disabled. Stop calling update_plan and just describe your steps in text.",
       );
     }
-    // 计划 v2(自主循环 S2):只在总开关开启时合并——目标三件套的改写保护、attempts
-    // 向后携带、权威快照都属自主循环行为;关闭时回执与引入前逐字一致。
+    // 计划 v2/v3(自主循环 S2/S3):只在总开关开启时合并——目标三件套的改写保护、
+    // 任务图依赖/预算、attempts 向后携带、权威快照都属自主循环行为;
+    // 关闭时回执与引入前逐字一致。
     if (state.settings.agentLoop?.enabled === true) {
       return planToolOutcome(
         context?.planContext?.previous ?? null,
         args,
-        { allowGoalChange: context?.planContext?.allowGoalChange === true },
+        {
+          allowGoalChange: context?.planContext?.allowGoalChange === true,
+          taskGraph: true,
+          requireVerified: state.settings.agentLoop.requireVerifiedCompletion === true,
+        },
       );
     }
     return planToolResult(args, { legacy: true });

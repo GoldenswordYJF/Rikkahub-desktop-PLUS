@@ -104,15 +104,6 @@ export interface DisplaySetting {
   ttsOnlyReadOutsideBrackets?: boolean;
   /** User-resizable chat input min-height in px (null = default). PC-only. */
   chatInputHeight?: number | null;
-  /** 实验：输入框旁的桌面伴侣。PC-only，导出安卓时剥离。 */
-  showCompanion?: boolean;
-  /** 帕秋莉已下架，目前只剩大肥鱼；旧数据里的其它 id 由 normalizeCompanionSkin 兜底。 */
-  companionSkin?: "deepy";
-  companionBubbles?: boolean;
-  /** 精灵整数倍缩放（1–4，默认 2）。非整数倍会让像素图发虚，所以只给档位不给滑杆。 */
-  companionScale?: number;
-  /** 相对默认锚点（输入列左下）的像素位移；拖拽落点即写这里。 */
-  companionPos?: { x: number; y: number };
   /** 专题8:UI 主题与语言的权威存储(原在 localStorage,按 origin 隔离,改端口即丢)。
    *  PC-only,已在 pc-server pcOnlyDisplayFields 剥离清单,导出安卓不可见。 */
   themeMode?: "light" | "dark" | "system";

@@ -11,6 +11,7 @@ import { error, json } from "./api/request";
 import { healthResponse } from "./api/health";
 import { startAnalytics } from "./app-config/analytics";
 import { bootstrap } from "./bootstrap";
+import { AgentTaskScheduler } from "./agent-loop/scheduler";
 import { getStartupStatus, isStartupReady, markStartupFailed, markStartupReady } from "./foundation/startup-gate";
 import { DataDirLockedError, acquireDataDirLock, releaseDataDirLock } from "./persistence/instance-lock";
 import { runDataDirHygiene } from "./persistence/data-dir-hygiene";
@@ -602,6 +603,8 @@ const gracefulShutdown = createGracefulShutdown({
     stopListeners(listeners, closeActiveConnections);
   },
   async stopProducers() {
+    // 生命周期 L3:先停调度 tick,避免停机收尾期间再投递新消息。
+    AgentTaskScheduler.stop();
     // 先掐掉在跑的生成：它们的流式写盘与本次 flush 抢同一批会话，停下来再刷才完整。
     for (const conversationId of [...generating.keys()]) {
       abortGeneration(conversationId, "interrupted");

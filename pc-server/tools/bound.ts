@@ -49,13 +49,11 @@ export function openAiSubagentTool() {
  *  与工具行折叠、长文本粘贴同一族"PC 端显示项",随备份导出剥离,安卓侧永不见这个键。
  *  默认开(「不写即开」,与 defaults.ts 同向);关掉只是不再向模型声明它,
  *  历史消息里已有的计划 part 照常渲染成面板。
- *  自主循环 S2:开启 agentLoop 才声明计划 v2 字段(goal/done_when/boundaries +
- *  step 的 id/verify/evidence),关闭时 schema 与引入前逐字一致。 */
+ *  自主循环 S2/S3:开启 agentLoop 才声明计划 v3 字段(目标三件套 + 依赖/预算/失败),
+ *  关闭时 schema 与引入前逐字一致。V3 复用同一实验开关,不另立灰度。 */
 export function openAiPlanTool() {
-  return openAiPlanToolCore(
-    state.settings.displaySetting?.planPanel !== false,
-    state.settings.agentLoop?.enabled === true,
-  );
+  const graph = state.settings.agentLoop?.enabled === true;
+  return openAiPlanToolCore(state.settings.displaySetting?.planPanel !== false, graph, graph);
 }
 
 /** 会话级函数工具全集（M1-4）：四家装配点（orchestrator ×4 + conversation-encoding）

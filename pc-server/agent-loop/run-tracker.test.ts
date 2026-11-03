@@ -135,4 +135,21 @@ describe("运行状态机", () => {
     expect(getRun(tracker.runId)).toMatchObject({ status: "succeeded", error: null });
     expect(listRunEvents(tracker.runId).filter((event) => event.kind === "run_finished")).toHaveLength(1);
   });
+
+  test("生命周期链接:beginAgentRun 写入 resumed_from_run_id / schedule_id", () => {
+    const linked = beginAgentRun({
+      conversationId: CONV,
+      nodeId: "n1",
+      engine: "chat",
+      resumedFromRunId: "run-interrupted",
+      scheduleId: "schedule-7",
+    })!;
+    expect(getRun(linked.runId)).toMatchObject({
+      resumedFromRunId: "run-interrupted",
+      scheduleId: "schedule-7",
+    });
+    const started = listRunEvents(linked.runId).find((event) => event.kind === "run_started");
+    expect(started?.payload).toMatchObject({ resumedFromRunId: "run-interrupted", scheduleId: "schedule-7" });
+    linked.finishTerminal("stopped", { stopReason: "test" });
+  });
 });

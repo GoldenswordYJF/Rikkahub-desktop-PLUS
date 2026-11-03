@@ -122,7 +122,6 @@ export const SETTINGS_NAV = [
       { id: "memory", labelKey: "settings:subnav.experiments.memory" },
       { id: "mood", labelKey: "settings:subnav.experiments.mood" },
       { id: "agent-bot", labelKey: "settings:subnav.experiments.agent_bot" },
-      { id: "companion", labelKey: "settings:subnav.experiments.companion" },
     ],
   },
   {

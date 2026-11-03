@@ -144,6 +144,7 @@ function pcSentinelSettings(): Settings {
     stallRepeatLimit: 4,
     sameErrorLimit: 4,
     requireVerifiedCompletion: false,
+    schedulingEnabled: false,
   };
   settings.sshDevices = [{
     id: "pc-ssh-device",

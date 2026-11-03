@@ -7,6 +7,7 @@ import {
   CircleAlert,
   CircleDashed,
   CircleDot,
+  CircleX,
   History,
   Link2,
   ListChecks,
@@ -24,7 +25,8 @@ import {
   planViewFromProjection,
   type RunPlanView,
 } from "~/lib/plan-model";
-import { isPlanV2, isStepUnverified, planProgress, type PlanStep } from "@server/tools/plan";
+import { isPlanV2, isPlanV3, isStepUnverified, planProgress, type PlanStep } from "@server/tools/plan";
+import { analyzePlanGraph, type PlanGraphAnalysis } from "@server/tools/plan-graph";
 import { buildToolCallMessageIndex, shortToolCallId } from "~/lib/agent-run-locate";
 import { useRunPlanProjection } from "~/hooks/use-run-plan-projection";
 import { useSharedAgentRunSelection } from "~/components/workspace/agent-run-selection";
@@ -43,6 +45,7 @@ const STATUS_ICONS = {
   in_progress: CircleDot,
   completed: Check,
   cancelled: Minus,
+  failed: CircleX,
 } as const;
 
 type ChipState = "visible" | "hidden" | "missing";
@@ -180,6 +183,59 @@ function StepEvidence({
   );
 }
 
+/** 任务图状态徽标 + 重试计数。抽出来便于直接渲染验收:面板只展示分析结果,
+ *  不在这里重算依赖。旧 v2 计划(无图、无尝试)不渲染任何额外元素。 */
+export function PlanStepGraphBadges({
+  step,
+  stepId,
+  analysis,
+  graph,
+  v2,
+  t,
+}: {
+  step: PlanStep;
+  stepId: string;
+  analysis: PlanGraphAnalysis | null;
+  graph: boolean;
+  v2: boolean;
+  t: TFunction<"common">;
+}) {
+  const blockedDeps = analysis?.blocked[stepId] ?? [];
+  const retryable = analysis?.retryable.includes(stepId) === true;
+  const exhausted = analysis?.exhausted.includes(stepId) === true;
+  if (!v2 || (!graph && (step.attempts ?? 0) === 0)) return null;
+  return (
+    <>
+      {exhausted ? (
+        <span className="inline-block shrink-0 rounded border border-destructive/40 px-1 text-[10px] leading-4 text-destructive">
+          {t("workbench.plan.exhausted")}
+        </span>
+      ) : null}
+      {retryable ? (
+        <span className="inline-block shrink-0 rounded border border-amber-500/40 px-1 text-[10px] leading-4 text-amber-600 dark:text-amber-400">
+          {t("workbench.plan.retryable")}
+        </span>
+      ) : null}
+      {blockedDeps.length > 0 ? (
+        <span
+          className="inline-block shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-muted-foreground"
+          title={`${t("workbench.plan.depends_on")}: ${blockedDeps.join(", ")}`}
+        >
+          {t("workbench.plan.blocked", { deps: blockedDeps.join(", ") })}
+        </span>
+      ) : null}
+      <span className="text-[10px] text-muted-foreground/60">
+        {graph
+          ? t("workbench.plan.attempts_of_max", {
+              count: step.attempts ?? 0,
+              max: step.maxAttempts ?? 3,
+            })
+          : t("workbench.plan.attempts", { count: step.attempts })}
+      </span>
+    </>
+  );
+}
+
 export function PlanPanel({ conversationId }: { conversationId?: string | null }) {
   const { t } = useTranslation("common");
   const navigate = useNavigate();
@@ -208,6 +264,12 @@ export function PlanPanel({ conversationId }: { conversationId?: string | null }
 
   const plan = historyRunId ? (view?.plan ?? null) : (latestEntry?.plan ?? null);
   const v2 = historyRunId ? view?.v2 === true : latestEntry ? isPlanV2(latestEntry.plan) : false;
+  const graph = plan ? isPlanV3(plan) : false;
+  // 与控制器同一个纯函数:面板不维护第二份图状态,只按旧计划/新图分别展示。
+  const graphAnalysis = React.useMemo(
+    () => (plan && graph ? analyzePlanGraph(plan) : null),
+    [plan, graph],
+  );
 
   const handleLocate = React.useCallback(
     (messageId: string, toolCallId: string) => {
@@ -390,12 +452,17 @@ export function PlanPanel({ conversationId }: { conversationId?: string | null }
           const settled = step.status === "completed" || step.status === "cancelled";
           // 未验证只对 v2 计划显示:旧计划没有 evidence 字段,保持原样式不误伤。
           const unverified = v2 && isStepUnverified(step);
+          const stepId = step.id ?? `s${index + 1}`;
+          const blockedDeps = graphAnalysis?.blocked[stepId] ?? [];
+          const retryable = graphAnalysis?.retryable.includes(stepId) === true;
+          const exhausted = graphAnalysis?.exhausted.includes(stepId) === true;
           return (
             <li
               key={step.id ?? `${index}-${step.content}`}
               className={cn(
                 "rounded-lg px-2 py-1.5 text-xs",
                 step.status === "in_progress" && "bg-muted/60",
+                blockedDeps.length > 0 && "opacity-75",
               )}
             >
               <div className="flex items-start gap-2">
@@ -406,6 +473,7 @@ export function PlanPanel({ conversationId }: { conversationId?: string | null }
                     step.status === "in_progress" && "text-primary",
                     step.status === "pending" && "text-muted-foreground/70",
                     step.status === "cancelled" && "text-muted-foreground/50",
+                    step.status === "failed" && "text-destructive",
                   )}
                 >
                   <Icon className="size-4" strokeWidth={1.75} />
@@ -428,12 +496,25 @@ export function PlanPanel({ conversationId }: { conversationId?: string | null }
                         {t("workbench.plan.unverified")}
                       </span>
                     ) : null}
-                    {v2 && (step.attempts ?? 0) > 0 ? (
-                      <span className="text-[10px] text-muted-foreground/60">
-                        {t("workbench.plan.attempts", { count: step.attempts })}
-                      </span>
+                    {exhausted || retryable || blockedDeps.length > 0 || (v2 && (graph || (step.attempts ?? 0) > 0)) ? (
+                      <PlanStepGraphBadges
+                        step={step}
+                        stepId={stepId}
+                        analysis={graphAnalysis}
+                        graph={graph}
+                        v2={v2}
+                        t={t}
+                      />
                     ) : null}
                   </div>
+                  {graph && (step.dependsOn?.length ?? 0) > 0 ? (
+                    <p className="break-words text-[11px] leading-relaxed text-muted-foreground/80">
+                      <span className="text-muted-foreground/60">
+                        {t("workbench.plan.depends_on")}：
+                      </span>
+                      {step.dependsOn!.join(", ")}
+                    </p>
+                  ) : null}
                   {v2 && step.verify ? (
                     <p className="break-words text-[11px] leading-relaxed text-muted-foreground/80">
                       <span className="text-muted-foreground/60">

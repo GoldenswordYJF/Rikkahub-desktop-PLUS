@@ -68,6 +68,11 @@ export interface AgentRunSummary {
   replanCount: number;
   stallReason: string | null;
   /** 目标快照(S1 固定为 null;S2 起由计划 v2 的 goal 回填)。 */
+  /** 生命周期:本 run 由哪条中断 run 显式恢复而来;普通运行为 null。 */
+  resumedFromRunId?: string | null;
+  /** 生命周期:触发本 run 的调度 id;手动/恢复运行为 null。 */
+  scheduleId?: string | null;
+  /** 目标快照(S1 固定为 null;S2 起由计划 v2 的 goal 回填)。 */
   goal: string | null;
   startedAt: number;
   endedAt: number | null;
@@ -166,4 +171,29 @@ export interface RunProjectionDto {
   plan: RunPlanProjectionDto;
   /** run 内出现过的全部边界定义;键为 boundaryId。缺失的 ref 由前端明确标注不可用。 */
   boundaries: Record<string, RunBoundarySnapshotDto>;
+}
+
+/** 生命周期 L1:run 已落库进度的只读摘要(恢复与审计共用,不复制事件正文)。 */
+export interface RunCheckpointDto {
+  /** 已落库的最大事件 seq;没有事件为 0。 */
+  throughSeq: number;
+  /** 最后一条事件(最大 seq)的时间;没有事件为 null。 */
+  lastEventAt: number | null;
+  /** 现有 run 投影能否还原计划(投影失败按 false,不抛)。 */
+  planAvailable: boolean;
+  /** 边界投影去重后的数量。 */
+  boundaryCount: number;
+}
+
+/** 生命周期 L2:恢复方式。none = 不可恢复;suspended = 走原审批续跑;
+ *  new_run = 可新建 run 显式恢复。 */
+export type AgentRunResumeMode = "none" | "suspended" | "new_run";
+
+/** GET /api/conversations/:id/agent-runs/:runId/recovery 的响应。 */
+export interface AgentRunRecoveryDto {
+  runId: string;
+  mode: AgentRunResumeMode;
+  /** mode=none 时的明确原因(conversation_busy / approval_missing / status_*),否则 null。 */
+  reason: string | null;
+  checkpoint: RunCheckpointDto;
 }

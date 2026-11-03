@@ -37,11 +37,11 @@ function planFromToolPart(part: Record<string, unknown>): Plan | null {
     const entry = output[i];
     if (!isRecord(entry) || entry.type !== "text" || !isRecord(entry.metadata)) continue;
     if (!isRecord(entry.metadata.planV2)) continue;
-    const plan = normalizePlan(entry.metadata.planV2, { trusted: true });
+    const plan = normalizePlan(entry.metadata.planV2, { trusted: true, graph: true });
     if (plan.steps.length > 0) return plan;
   }
   const input = typeof part.input === "string" ? safeParse(part.input) : part.input;
-  const plan = normalizePlan(input);
+  const plan = normalizePlan(input, { graph: true });
   return plan.steps.length > 0 ? plan : null;
 }
 
@@ -56,7 +56,8 @@ export function findPlanContext(conversation: Conversation, currentToolCallId?: 
     const message = node?.messages?.[index] ?? node?.messages?.[0];
     if (!message) continue;
     seq += 1;
-    if (message.role === "USER") lastUserSeq = seq;
+    // run_resume 是恢复同一条逻辑任务,不开启可改写目标的新 run。
+    if (message.role === "USER" && !isRunResumeMessage(message)) lastUserSeq = seq;
     const parts = Array.isArray(message.parts) ? message.parts : [];
     for (const part of parts) {
       if (!isRecord(part) || part.type !== "tool" || part.toolName !== PLAN_TOOL_NAME) continue;
@@ -77,6 +78,52 @@ function isSteeredMessage(message: { annotations?: unknown }): boolean {
   return annotations.some((entry) => isRecord(entry) && entry.type === "steered");
 }
 
+/** 生命周期 L2:恢复中断任务的用户消息(run_resume 注解)。与 steering 同理不切计划
+ *  边界——恢复的是同一条逻辑任务,旧计划继续作为合并基线与完成校验依据,重试预算
+ *  不因进程重启被重置。 */
+function isRunResumeMessage(message: { annotations?: unknown }): boolean {
+  const annotations = Array.isArray(message.annotations) ? message.annotations : [];
+  return annotations.some((entry) => isRecord(entry) && entry.type === "run_resume");
+}
+
+/** 触发生成的最近一条 USER 消息上的指定类型注解;没有则 null。
+ *  只认"最近一条 USER"——更早消息上的注解不属于本次生成。 */
+function nearestUserAnnotation(
+  conversation: Conversation | null | undefined,
+  type: string,
+): Record<string, unknown> | null {
+  if (!conversation) return null;
+  const nodes = Array.isArray(conversation.messages) ? conversation.messages : [];
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    const node = nodes[i];
+    const index = typeof node?.selectIndex === "number" ? node.selectIndex : 0;
+    const message = node?.messages?.[index] ?? node?.messages?.[0];
+    if (!message || message.role !== "USER") continue;
+    const annotations = Array.isArray(message.annotations) ? message.annotations : [];
+    for (const entry of annotations) {
+      if (isRecord(entry) && entry.type === type) return entry;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** 触发生成的最近一条 USER 消息若是恢复消息,返回其目标 runId;否则 null。
+ *  由编排层在 beginAgentRun 前调用,把 resumed_from_run_id 落到新 run 上。 */
+export function runResumeTarget(conversation: Conversation | null | undefined): string | null {
+  const annotation = nearestUserAnnotation(conversation, "run_resume");
+  return annotation && typeof annotation.runId === "string" && annotation.runId ? annotation.runId : null;
+}
+
+/** 生命周期 L3:调度投递的 USER 消息上的 scheduleId;普通生成为 null。
+ *  编排层据此给 run 写 schedule_id 并回写 last_run_*。 */
+export function scheduleTarget(conversation: Conversation | null | undefined): string | null {
+  const annotation = nearestUserAnnotation(conversation, "scheduled");
+  return annotation && typeof annotation.scheduleId === "string" && annotation.scheduleId
+    ? annotation.scheduleId
+    : null;
+}
+
 /** 会话选中路径上「当前 run」的最新完整计划(完成校验与运行记录读它)。
  *  run 边界 = 最后一条非 steered 的 USER 消息:
  *   - steer 补发插入的 USER 消息带 steered 注解,不算新 run——计划仍是当前有效的那份;
@@ -93,7 +140,7 @@ export function latestPlan(conversation: Conversation | null | undefined): Plan 
     const message = node?.messages?.[index] ?? node?.messages?.[0];
     if (!message) continue;
     seq += 1;
-    if (message.role === "USER" && !isSteeredMessage(message)) lastUserSeq = seq;
+    if (message.role === "USER" && !isSteeredMessage(message) && !isRunResumeMessage(message)) lastUserSeq = seq;
     const parts = Array.isArray(message.parts) ? message.parts : [];
     for (const part of parts) {
       if (!isRecord(part) || part.type !== "tool" || part.toolName !== PLAN_TOOL_NAME) continue;
